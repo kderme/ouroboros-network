@@ -1,4 +1,5 @@
 {-# LANGUAGE ConstraintKinds            #-}
+{-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE FunctionalDependencies     #-}
@@ -33,12 +34,14 @@ import           Data.Functor.Identity
 import           Data.Kind (Constraint)
 import           Data.Typeable (Typeable)
 import           Data.Word (Word64)
+import           GHC.Generics (Generic)
 
 import           Control.Monad.Class.MonadSay
 
 import           Ouroboros.Network.AnchoredFragment (AnchoredFragment (..))
 import           Ouroboros.Network.Block (HasHeader (..), SlotNo (..))
 import           Ouroboros.Network.Point (WithOrigin)
+import qualified Ouroboros.Network.Util as Util
 
 import qualified Ouroboros.Consensus.Util.AnchoredFragment as AF
 import           Ouroboros.Consensus.Util.Random
@@ -208,7 +211,10 @@ class ( Show (ChainState    p)
 -- NOTE: This talks about the number of /blocks/ we can roll back, not
 -- the number of /slots/.
 newtype SecurityParam = SecurityParam { maxRollbacks :: Word64 }
-  deriving (Show, Eq)
+  deriving (Generic, Eq)
+
+instance Show SecurityParam where
+  showsPrec = Util.gshowsPrecForgetFields
 
 {-------------------------------------------------------------------------------
   State monad

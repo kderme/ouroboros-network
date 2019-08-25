@@ -56,10 +56,14 @@ import           GHC.Generics (Generic)
 
 import           Ouroboros.Network.Point (WithOrigin (..), origin, block)
 import qualified Ouroboros.Network.Point as Point (Block (..))
+import qualified Ouroboros.Network.Util as Util
 
 -- | The 0-based index for the Ourboros time slot.
 newtype SlotNo = SlotNo { unSlotNo :: Word64 }
-  deriving (Show, Eq, Ord, Enum, Bounded, Num, Serialise, Generic)
+  deriving (Eq, Ord, Enum, Bounded, Num, Serialise, Generic)
+
+instance Show SlotNo where
+  showsPrec = Util.gshowsPrecForgetFields
 
 instance ToCBOR SlotNo where
   toCBOR = encode
@@ -68,7 +72,10 @@ instance ToCBOR SlotNo where
 -- BlockNo is <= SlotNo and is only equal at slot N if there is a block
 -- for every slot where N <= SlotNo.
 newtype BlockNo = BlockNo { unBlockNo :: Word64 }
-  deriving (Show, Eq, Ord, Enum, Bounded, Num, Serialise, Generic)
+  deriving (Eq, Ord, Enum, Bounded, Num, Serialise, Generic)
+
+instance Show BlockNo where
+  showsPrec = Util.gshowsPrecForgetFields
 
 genesisSlotNo :: SlotNo
 genesisSlotNo = SlotNo 0
@@ -146,10 +153,12 @@ castHash (BlockHash b) = BlockHash b
 newtype Point block = Point
     { getPoint :: WithOrigin (Point.Block SlotNo (HeaderHash block))
     }
+  deriving (Generic)
 
 deriving instance StandardHash block => Eq   (Point block)
 deriving instance StandardHash block => Ord  (Point block)
-deriving instance StandardHash block => Show (Point block)
+instance          StandardHash block => Show (Point block) where
+  showsPrec = Util.gshowsPrecForgetFields
 
 pattern GenesisPoint :: Point block
 pattern GenesisPoint = Point Origin

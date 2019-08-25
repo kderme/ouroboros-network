@@ -31,6 +31,7 @@
           (hsPkgs.containers)
           (hsPkgs.dns)
           (hsPkgs.fingertree)
+          (hsPkgs.generic-deriving)
           (hsPkgs.iproute)
           (hsPkgs.network)
           (hsPkgs.serialise)

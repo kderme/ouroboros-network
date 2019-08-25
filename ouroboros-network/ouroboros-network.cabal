@@ -88,6 +88,7 @@ library
                        Ouroboros.Network.Protocol.LocalTxSubmission.Codec
                        Ouroboros.Network.TxSubmission.Inbound
                        Ouroboros.Network.TxSubmission.Outbound
+                       Ouroboros.Network.Util
 
   default-language:    Haskell2010
   other-extensions:    BangPatterns,
@@ -128,6 +129,7 @@ library
                        containers,
                        dns,
                        fingertree        >=0.1.4.2 && <0.2,
+                       generic-deriving  >=1.12.4 && <1.13,
                        iproute           >=1.7.0 && <1.8,
                        network,
                        serialise         >=0.2 && <0.3,
@@ -217,6 +219,7 @@ test-suite test-network
                        Ouroboros.Network.Subscription.Worker
                        Ouroboros.Network.TxSubmission.Inbound
                        Ouroboros.Network.TxSubmission.Outbound
+                       Ouroboros.Network.Util
 
                        Test.AnchoredFragment
                        Test.Chain
@@ -243,6 +246,7 @@ test-suite test-network
                        directory,
                        dns,
                        fingertree,
+                       generic-deriving,
                        hashable,
                        io-sim            >=0.1 && < 0.2,
                        io-sim-classes,
@@ -295,6 +299,7 @@ test-suite cddl
                        Ouroboros.Network.Protocol.Handshake.Version
                        Ouroboros.Network.Testing.ConcreteBlock
                        Ouroboros.Network.Block
+                       Ouroboros.Network.Util
   default-language:    Haskell2010
   build-depends:       base,
                        bytestring,
@@ -302,6 +307,7 @@ test-suite cddl
                        cborg,
                        containers,
                        fingertree,
+                       generic-deriving,
                        hashable,
                        io-sim-classes,
                        process-extras,
@@ -322,6 +328,7 @@ executable demo-chain-sync
                        containers,
                        contra-tracer,
                        directory,
+                       generic-deriving,
                        network-mux,
                        network,
                        ouroboros-network,

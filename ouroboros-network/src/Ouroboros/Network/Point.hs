@@ -16,6 +16,8 @@ module Ouroboros.Network.Point
 
 import           GHC.Generics (Generic)
 
+import qualified Ouroboros.Network.Util as Util
+
 data WithOrigin t = Origin | At !t
   deriving (Eq, Ord, Show, Generic, Functor, Foldable, Traversable)
 
@@ -23,7 +25,10 @@ data Block slot hash = Block
   { blockPointSlot :: !slot
   , blockPointHash :: !hash
   }
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Generic, Ord)
+
+instance (Show slot, Show hash) => Show (Block slot hash) where
+  showsPrec = Util.gshowsPrecForgetFields
 
 at :: t -> WithOrigin t
 at = At
