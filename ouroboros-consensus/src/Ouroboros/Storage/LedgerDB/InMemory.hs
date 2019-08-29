@@ -343,7 +343,10 @@ ledgerDbPush cfg (pa, new) ldb = runExceptT $
         where
           l = csLedger cs
   where
-    appNew  = applyBlock cfg (pa, new)
+    appNew :: l -> ExceptT (Err ap e) m l
+    appNew = applyBlock cfg (pa, new)
+
+    reapp :: r -> LedgerDB l r -> ExceptT (Err ap e) m (LedgerDB l r)
     reapp r = lift . ledgerDbReapply cfg (Ref r)
 
     goCS :: ChainSummary l r -> ExceptT (Err ap e) m (ChainSummary l r)
