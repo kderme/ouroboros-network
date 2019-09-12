@@ -74,6 +74,7 @@ type family ForgetFields (rep :: * -> *) :: * -> * where
     ForgetFields UInt         = UInt
     ForgetFields UWord        = UWord
 
+-- | Remove data about field selectors
 type family ForgetFieldsMeta (rep :: Meta) :: Meta where
     ForgetFieldsMeta ('MetaSel 'Nothing  su ss ds) = 'MetaSel 'Nothing su ss ds
     ForgetFieldsMeta ('MetaSel ('Just _) su ss ds) = 'MetaSel 'Nothing su ss ds
