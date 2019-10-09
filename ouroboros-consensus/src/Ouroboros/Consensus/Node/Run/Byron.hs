@@ -49,6 +49,11 @@ instance ByronGiven => RunNode (ByronBlockOrEBB ByronConfig) where
                          . Genesis.gdStartTime
                          . extractGenesisData
 
+  -- Extract it from the 'Genesis.Config'
+  nodeProtocolMagicId    = const
+                         $ Genesis.gdProtocolMagicId
+                         . extractGenesisData
+
   nodeEncodeBlock        = const encodeByronBlock
   nodeEncodeHeader       = const encodeByronHeader
   nodeEncodeGenTx        = encodeByronGenTx

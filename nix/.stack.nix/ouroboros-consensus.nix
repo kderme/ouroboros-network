@@ -101,6 +101,7 @@
             (hsPkgs.ouroboros-consensus)
             (hsPkgs.io-sim-classes)
             (hsPkgs.io-sim)
+            (hsPkgs.cborg)
             (hsPkgs.containers)
             (hsPkgs.contra-tracer)
             (hsPkgs.cryptonite)
