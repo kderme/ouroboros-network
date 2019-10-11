@@ -15,6 +15,7 @@ module Ouroboros.Consensus.Mempool.Impl (
   , openMempoolWithoutSyncThread
   ) where
 
+import           Control.Exception (assert)
 import           Control.Monad.Except
 import qualified Data.Foldable as Foldable
 import           Data.Typeable
@@ -159,7 +160,8 @@ implAddTxs :: forall m blk. (IOLike m, ApplyTx blk)
            => MempoolEnv m blk
            -> [GenTx blk]
            -> m [(GenTx blk, Maybe (ApplyTxErr blk))]
-implAddTxs mpEnv@MempoolEnv{mpEnvStateVar, mpEnvLedgerCfg, mpEnvTracer} txs = do
+implAddTxs mpEnv@MempoolEnv{mpEnvStateVar, mpEnvLedgerCfg, mpEnvTracer} txs =
+  assert (all txInvariant txs) $ do
     (removed, accepted, rejected, mempoolSize) <- atomically $ do
       -- First sync the state, which might remove some transactions
       syncRes@ValidationResult { vrInvalid = removed } <- validateIS mpEnv
