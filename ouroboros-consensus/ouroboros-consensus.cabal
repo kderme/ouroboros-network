@@ -317,6 +317,7 @@ test-suite test-consensus
                     random,
                     reflection,
                     serialise,
+                    splitmix,
                     tasty,
                     tasty-hunit,
                     tasty-quickcheck,

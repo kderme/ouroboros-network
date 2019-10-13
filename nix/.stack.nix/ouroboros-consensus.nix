@@ -115,6 +115,7 @@
             (hsPkgs.random)
             (hsPkgs.reflection)
             (hsPkgs.serialise)
+            (hsPkgs.splitmix)
             (hsPkgs.tasty)
             (hsPkgs.tasty-hunit)
             (hsPkgs.tasty-quickcheck)

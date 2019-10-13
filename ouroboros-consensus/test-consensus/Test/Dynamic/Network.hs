@@ -1,22 +1,29 @@
-{-# LANGUAGE ConstraintKinds      #-}
-{-# LANGUAGE DataKinds            #-}
-{-# LANGUAGE FlexibleContexts     #-}
-{-# LANGUAGE GADTs                #-}
-{-# LANGUAGE LambdaCase           #-}
-{-# LANGUAGE NamedFieldPuns       #-}
-{-# LANGUAGE RankNTypes           #-}
-{-# LANGUAGE RecordWildCards      #-}
-{-# LANGUAGE ScopedTypeVariables  #-}
-{-# LANGUAGE TupleSections        #-}
-{-# LANGUAGE TypeApplications     #-}
-{-# LANGUAGE TypeFamilies         #-}
-{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE BangPatterns               #-}
+{-# LANGUAGE ConstraintKinds            #-}
+{-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE DeriveFoldable             #-}
+{-# LANGUAGE DeriveFunctor              #-}
+{-# LANGUAGE DeriveTraversable          #-}
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE GADTs                      #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE NamedFieldPuns             #-}
+{-# LANGUAGE RankNTypes                 #-}
+{-# LANGUAGE RecordWildCards            #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE TupleSections              #-}
+{-# LANGUAGE TypeApplications           #-}
+{-# LANGUAGE TypeFamilies               #-}
+{-# LANGUAGE UndecidableInstances       #-}
 
 -- | Setup network
 module Test.Dynamic.Network (
     runNodeNetwork
+  , MaxLatencies (..)
   , NodeNetworkArgs (..)
   , TracingConstraints
+  , LatencyInjection (..)
     -- * Tracers
   , MiniProtocolExpectedException (..)
   , MiniProtocolFatalException (..)
@@ -39,9 +46,15 @@ import qualified Data.Map.Strict as Map
 import           Data.Proxy (Proxy (..))
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.Time.Clock (picosecondsToDiffTime)
 import qualified Data.Typeable as Typeable
+import           Data.Word (Word64)
 import           GHC.Stack
+import           System.Random.SplitMix (SMGen)
+import qualified System.Random.SplitMix as SM
 
+import qualified Control.Monad.Class.MonadSTM as Q
+import           Control.Monad.Class.MonadSTM.Strict
 import           Control.Monad.Class.MonadThrow
 
 import           Network.TypedProtocol.Channel
@@ -97,15 +110,34 @@ import qualified Test.Util.FS.Sim.MockFS as Mock
 import           Test.Util.FS.Sim.STM (simHasFS)
 import           Test.Util.Tracer
 
+-- | The maximum possible latencies
+--
+data MaxLatencies = MaxLatencies
+  { maxSendLatency    :: !DiffTime
+    -- ^ Similar to the Serialisation latency of GSV, though see the NOTE on
+    -- 'newLivePipe' regarding back pressure
+    --
+  , maxVar1Latency :: !DiffTime
+    -- ^ Similar to the Variable latency of GSV, though the NOTE on
+    -- 'newLivePipe' regarding pipelining
+  }
+
 data NodeNetworkArgs m blk = NodeNetworkArgs
-  { nnaNodeJoinPlan    :: !NodeJoinPlan
-  , nnaNodeTopology    :: !NodeTopology
-  , nnaNumCoreNodes    :: !NumCoreNodes
-  , nnaProtocol        :: !(CoreNodeId -> ProtocolInfo blk)
-  , nnaRegistry        :: !(ResourceRegistry m)
-  , nnaSlotLen         :: !DiffTime
-  , nnaTestBtime       :: !(TestBlockchainTime m)
-  , nnaTxSeed          :: !ChaChaDRG
+  { nnaLatencySeed         :: !(LatencyInjection SMGen)
+  , nnaLatestReadySlot     :: !(StrictTVar m SlotNo)
+    -- ^ Setting this to @s@ indicates that all slots preceding @s@ have
+    -- quiesced
+  , nnaMaxLatencies        :: !MaxLatencies
+  , nnaNodeJoinPlan        :: !NodeJoinPlan
+  , nnaNodeTopology        :: !NodeTopology
+  , nnaNumCoreNodes        :: !NumCoreNodes
+  , nnaProtocol            :: !(CoreNodeId -> ProtocolInfo blk)
+  , nnaQuiescenceThreshold :: !DiffTime
+    -- ^ A slot ends when there have been no sent-but-not-yet-received mini
+    -- protocol messages for at least this long
+  , nnaRegistry            :: !(ResourceRegistry m)
+  , nnaTestBtime           :: !(TestBlockchainTime m)
+  , nnaTxSeed              :: !ChaChaDRG
   }
 
 -- | Setup a network of core nodes, where each joins according to the node join
@@ -123,14 +155,17 @@ runNodeNetwork :: forall m blk.
                => NodeNetworkArgs m blk
                -> m (TestOutput blk)
 runNodeNetwork NodeNetworkArgs
-  { nnaNodeJoinPlan    = nodeJoinPlan
-  , nnaNodeTopology    = nodeTopology
-  , nnaNumCoreNodes    = numCoreNodes
-  , nnaProtocol        = pInfo
-  , nnaRegistry        = registry
-  , nnaSlotLen         = slotLen
-  , nnaTestBtime       = testBtime
-  , nnaTxSeed          = initRNG
+  { nnaLatencySeed         = mbInitSMG
+  , nnaLatestReadySlot     = latestReadySlot
+  , nnaMaxLatencies
+  , nnaNodeJoinPlan        = nodeJoinPlan
+  , nnaNodeTopology        = nodeTopology
+  , nnaNumCoreNodes        = numCoreNodes
+  , nnaProtocol            = pInfo
+  , nnaQuiescenceThreshold = quiescenceThreshold
+  , nnaRegistry            = registry
+  , nnaTestBtime           = testBtime
+  , nnaTxSeed              = initRNG
   } = do
     -- This function is organized around the notion of a network of nodes as a
     -- simple graph with no loops. The graph topology is determined by
@@ -145,6 +180,16 @@ runNodeNetwork NodeNetworkArgs
     -- node and server threads on the head node. These mini protocols begin as
     -- soon as both nodes have joined the network, according to @nodeJoinPlan@.
 
+    -- Do not let the slot advance until all live pipes have been empty for at
+    -- least the @quiescenceThreshold@ duration
+    livePipesVar <- uncheckedNewTVarM LivePipes
+      { nextPipeId = PipeId 0
+      , livePipes  = Map.empty
+      }
+    onSlotChange btime $ \s -> do
+        blockUntilQuiescent livePipesVar quiescenceThreshold
+        atomically $ writeTVar latestReadySlot (succ s)
+
     varRNG <- uncheckedNewTVarM initRNG
 
     -- allocate a TMVar for each node's network app
@@ -153,10 +198,11 @@ runNodeNetwork NodeNetworkArgs
         uncheckedNewEmptyMVar (error "no App available yet")
 
     -- spawn threads for each undirected edge
+    mbSMG <- mapM uncheckedNewTVarM mbInitSMG
     let edges = edgesNodeTopology nodeTopology
     forM_ edges $ \edge -> do
       void $ forkLinkedThread registry $ do
-        undirectedEdge nullDebugTracer nodeVars edge
+        undirectedEdge nullDebugTracer mbSMG livePipesVar nodeVars edge
 
     -- create nodes
     let nodesByJoinSlot =
@@ -201,10 +247,12 @@ runNodeNetwork NodeNetworkArgs
     undirectedEdge ::
          HasCallStack
       => Tracer m (SlotNo, MiniProtocolState, MiniProtocolExpectedException blk)
+      -> LatencyInjection (StrictTVar m SMGen)
+      -> LivePipesVar m
       -> Map CoreNodeId (StrictMVar m (LimitedApp m NodeId blk))
       -> (CoreNodeId, CoreNodeId)
       -> m ()
-    undirectedEdge tr nodeVars (node1, node2) = do
+    undirectedEdge tr mbSMG livePipesVar nodeVars (node1, node2) = do
       -- block until both endpoints have joined the network
       (endpoint1, endpoint2) <- do
         let lu node = case Map.lookup node nodeVars of
@@ -213,11 +261,9 @@ runNodeNetwork NodeNetworkArgs
         (,) <$> lu node1 <*> lu node2
 
       -- spawn threads for both directed edges
+      let de = directedEdge nnaMaxLatencies tr btime mbSMG livePipesVar
       void $ withAsyncsWaitAny $
-          directedEdge tr btime endpoint1 endpoint2
-        NE.:|
-        [ directedEdge tr btime endpoint2 endpoint1
-        ]
+          de endpoint1 endpoint2 NE.:| [de endpoint2 endpoint1]
 
     -- | Produce transactions every time the slot changes and submit them to
     -- the mempool.
@@ -272,7 +318,7 @@ runNodeNetwork NodeNetworkArgs
         , cdbValidation       = ImmDB.ValidateAllEpochs
         , cdbBlocksPerFile    = 4
         , cdbParamsLgrDB      = LgrDB.ledgerDbDefaultParams (protocolSecurityParam cfg)
-        , cdbDiskPolicy       = LgrDB.defaultDiskPolicy (protocolSecurityParam cfg) slotLen
+        , cdbDiskPolicy       = LgrDB.defaultDiskPolicy (protocolSecurityParam cfg) generousApproxSlotLen
           -- Integration
         , cdbNodeConfig       = cfg
         , cdbEpochInfo        = epochInfo
@@ -293,6 +339,12 @@ runNodeNetwork NodeNetworkArgs
         , cdbRegistry         = registry
         , cdbGcDelay          = 0
         }
+      where
+        -- a rough estimate of the average slot length, more likely an
+        -- overestimate than an underestimate
+        generousApproxSlotLen = 100 * (sendL + recvL)
+          where
+            MaxLatencies sendL recvL = nnaMaxLatencies
 
     createNode
       :: HasCallStack
@@ -406,23 +458,30 @@ runNodeNetwork NodeNetworkArgs
 -- 'MiniProtocolExpectedException'.
 directedEdge ::
   forall m blk. (IOLike m, SupportedBlock blk)
-  => Tracer m (SlotNo, MiniProtocolState, MiniProtocolExpectedException blk)
+  => MaxLatencies
+  -> Tracer m (SlotNo, MiniProtocolState, MiniProtocolExpectedException blk)
   -> BlockchainTime m
+  -> LatencyInjection (StrictTVar m SMGen)
+  -> LivePipesVar m
   -> (CoreNodeId, LimitedApp m NodeId blk)
   -> (CoreNodeId, LimitedApp m NodeId blk)
   -> m ()
-directedEdge tr btime nodeapp1 nodeapp2 =
+directedEdge maxLatencies tr btime mbSMG livePipesVar nodeapp1 nodeapp2 =
     loopOnMPEE
   where
-    loopOnMPEE =
-        directedEdgeInner nodeapp1 nodeapp2
-          `catch` hExpected
+    loopOnMPEE = do
+        (pids, edge) <-
+            directedEdgeInner maxLatencies mbSMG livePipesVar nodeapp1 nodeapp2
+        edge
+          `catch` hExpected pids
           `catch` hUnexpected
       where
         -- Catch and restart on expected exceptions
         --
-        hExpected :: MiniProtocolExpectedException blk -> m ()
-        hExpected e = do
+        hExpected :: Set PipeId -> MiniProtocolExpectedException blk -> m ()
+        hExpected pids e = do
+          atomically $ mapM_ (forgetPipeSTM livePipesVar) pids
+
           s@(SlotNo i) <- atomically $ getCurrentSlot btime
           traceWith tr (s, MiniProtocolDelayed, e)
           void $ blockUntilSlot btime $ SlotNo (succ i)
@@ -444,26 +503,30 @@ directedEdge tr btime nodeapp1 nodeapp2 =
 -- See 'directedEdge'.
 directedEdgeInner ::
   forall m blk. (IOLike m, SupportedBlock blk)
-  => (CoreNodeId, LimitedApp m NodeId blk)
+  => MaxLatencies
+  -> LatencyInjection (StrictTVar m SMGen)
+  -> LivePipesVar m
+  -> (CoreNodeId, LimitedApp m NodeId blk)
      -- ^ client threads on this node
   -> (CoreNodeId, LimitedApp m NodeId blk)
      -- ^ server threads on this node
-  -> m ()
-directedEdgeInner (node1, LimitedApp app1) (node2, LimitedApp app2) = do
-    void $ (>>= withAsyncsWaitAny) $
-      fmap flattenPairs $
-      sequence $
-      ( miniProtocol
-          (wrapMPEE MPEEChainSyncClient naChainSyncClient)
-          naChainSyncServer
-      ) NE.:|
-      [ miniProtocol
-          (wrapMPEE MPEEBlockFetchClient naBlockFetchClient)
-          (wrapMPEE MPEEBlockFetchServer naBlockFetchServer)
-      , miniProtocol
-          (wrapMPEE MPEETxSubmissionClient naTxSubmissionClient)
-          (wrapMPEE MPEETxSubmissionServer naTxSubmissionServer)
-      ]
+  -> m (Set PipeId, m ())
+directedEdgeInner maxLatencies mbSMG livePipesVar (node1, LimitedApp app1) (node2, LimitedApp app2) = do
+    mps <- sequence $
+        ( miniProtocol
+            (wrapMPEE MPEEChainSyncClient naChainSyncClient)
+            naChainSyncServer
+        ) NE.:|
+        [ miniProtocol
+            (wrapMPEE MPEEBlockFetchClient naBlockFetchClient)
+            (wrapMPEE MPEEBlockFetchServer naBlockFetchServer)
+        , miniProtocol
+            (wrapMPEE MPEETxSubmissionClient naTxSubmissionClient)
+            (wrapMPEE MPEETxSubmissionServer naTxSubmissionServer)
+        ]
+    let pids = foldMap (\(x,y) -> Set.insert x (Set.singleton y)) $ fmap fst mps
+        edge = void $ withAsyncsWaitAny $ flattenPairs $ fmap snd mps
+    pure (pids, edge)
   where
     flattenPairs :: forall a. NE.NonEmpty (a, a) -> NE.NonEmpty a
     flattenPairs = uncurry (<>) . NE.unzip
@@ -481,12 +544,16 @@ directedEdgeInner (node1, LimitedApp app1) (node2, LimitedApp app2) = do
          -> Channel m msg
          -> m ())
          -- ^ server action to run on node2
-      -> m (m (), m ())
+      -> m ((PipeId, PipeId), (m (), m ()))
     miniProtocol client server = do
-       (chan, dualChan) <- createConnectedChannels
-       pure
-         ( client app1 (fromCoreNodeId node2) chan
-         , server app2 (fromCoreNodeId node1) dualChan
+       (pid1, Pipe pipe1) <- newLivePipe maxLatencies mbSMG livePipesVar
+       (pid2, Pipe pipe2) <- newLivePipe maxLatencies mbSMG livePipesVar
+       let chan1 = Channel{send = send pipe1, recv = recv pipe2}
+           chan2 = Channel{send = send pipe2, recv = recv pipe1}
+       pure $ (,)
+         (pid1, pid2)
+         ( client app1 (fromCoreNodeId node2) chan1
+         , server app2 (fromCoreNodeId node1) chan2
          )
 
     wrapMPEE ::
@@ -761,3 +828,152 @@ data MiniProtocolFatalException = MiniProtocolFatalException
   deriving (Show)
 
 instance Exception MiniProtocolFatalException
+
+{-------------------------------------------------------------------------------
+  Latency Injection
+-------------------------------------------------------------------------------}
+
+data LatencyInjection a
+  = DoNotInjectLatencies
+    -- ^ Do not inject any latencies
+  | InjectTrivialLatencies
+    -- ^ Inject latencies of 0 duration, just to test affect on scheduler
+  | InjectLatencies a
+    -- ^ Inject actual latencies
+  deriving (Eq, Foldable, Functor, Show, Traversable)
+
+newtype PipeId = PipeId Word64
+  deriving (Enum, Eq, Ord, Show)
+
+-- | One half of a pair of connected 'Channel's: 'send' for one and 'recv' for
+-- the other
+--
+newtype Pipe m a = Pipe (Channel m a)
+
+-- | How many times has a pipe been emptied?
+--
+newtype EmptiedCount = EmptiedCount Word64
+  deriving (Enum, Eq, Ord, Show)
+
+data LivePipes a = LivePipes
+  { nextPipeId :: !PipeId
+  , livePipes  :: !(Map PipeId a)
+  }
+
+data LivePipe m = LivePipe
+  { lpCount    :: !(StrictTVar m EmptiedCount)
+  , lpInFlight :: !(StrictTVar m Word64)
+  }
+
+-- | A variable mapping each live pipe to its own variable, which contains
+-- @Just ec@ when the pipe is empty and @Nothing@ otherwise
+--
+type LivePipesVar m = StrictTVar m (LivePipes (LivePipe m))
+
+-- | Block until all live pipes have been empty for at least the given duration
+--
+blockUntilQuiescent :: IOLike m => LivePipesVar m -> DiffTime -> m ()
+blockUntilQuiescent livePipesVar dur = get >>= go
+  where
+    get = atomically $ do
+        LivePipes{livePipes} <- readTVar livePipesVar
+        forM livePipes $ \LivePipe{lpCount, lpInFlight} -> do
+            readTVar lpInFlight >>= check . (== 0)
+            readTVar lpCount
+
+    go sig1 = do
+        threadDelay dur
+        sig2 <- get
+        if sig1 == sig2 then pure () else go sig2
+
+-- | Create a pipe backed by a 'TQueue', add it to the live pipes, and
+-- return the channel for writing to it and reading from it.
+--
+-- NOTE This mock \"physical layer\" carries one message at a time (hence the
+-- name 'maxVar1Latency'). Though it uses queues so that a (pipelined) sender
+-- is never blocked, there will be no _latency hiding_. In other words, the
+-- stream of Variable latency samples have _already_ taken into account any
+-- possible latency hiding.
+--
+-- NOTE Similarly, it is assumed that the Serialisation latency sufficiently
+-- subsumes _back pressure_, since otherwise sending never blocks the sender.
+--
+-- The motivation for including latencies in this mock network is to explore
+-- different permutations/ways to interleave concurrent events. While realistic
+-- latencies would exhibit (conditional) (temporal) correlations due to
+-- pipelining, back pressure, and so on, we assume that samplers crafted to
+-- accurately synthesize those correlations would explore fewer scheduling
+-- permutations.
+--
+newLivePipe ::
+     ( IOLike m
+     , HasCallStack
+     )
+  => MaxLatencies
+  -> LatencyInjection (StrictTVar m SMGen)
+  -> LivePipesVar m
+  -> m (PipeId, Pipe m a)
+newLivePipe MaxLatencies{maxVar1Latency, maxSendLatency} mbSMG tvar = do
+    lpCount    <- uncheckedNewTVarM (EmptiedCount 0)
+    lpInFlight <- uncheckedNewTVarM 0
+    pid <- atomically $ do
+        LivePipes{nextPipeId, livePipes} <- readTVar tvar
+        writeTVar tvar LivePipes
+          { nextPipeId = succ nextPipeId
+          , livePipes  = Map.insert nextPipeId LivePipe{lpCount, lpInFlight} livePipes
+          }
+        pure nextPipeId
+
+    -- create a thread that reliably and order-preservingly transports messages
+    -- down the pipe
+    inBuf     <- atomically Q.newTQueue
+    outBuf    <- atomically Q.newTQueue
+    mbVar1SMG <- mapM split mbSMG
+    void $ fork $ forever $ do
+        x <- atomically $ Q.readTQueue inBuf
+
+        mapM (genDelay maxVar1Latency) mbVar1SMG >>= threadDelayLI
+
+        atomically $ Q.writeTQueue outBuf x
+
+    mbSendSMG <- mapM split mbSMG
+    let pipe = Pipe Channel
+          { send = \ !x -> do
+                atomically $ modifyTVar lpInFlight succ
+
+                mapM (genDelay maxSendLatency) mbSendSMG >>= threadDelayLI
+
+                atomically $ Q.writeTQueue inBuf x
+          , recv = atomically $ do
+                x <- Q.readTQueue outBuf
+
+                n <- readTVar lpInFlight
+                when (0 == n) $ error "impossible!"
+                when (1 == n) $ modifyTVar lpCount succ
+                writeTVar lpInFlight (pred n)
+
+                pure $ Just x
+          }
+
+    pure (pid, pipe)
+  where
+    split smgVar = atomically $ do
+        (smg1, smg') <- SM.splitSMGen <$> readTVar smgVar
+        writeTVar smgVar smg'
+        newTVar smg1
+
+    threadDelayLI = \case
+        DoNotInjectLatencies   -> pure ()
+        InjectTrivialLatencies -> threadDelay 0
+        InjectLatencies d      -> threadDelay d
+
+    genDelay mx smgVar = atomically $ do
+        (i, smg') <- SM.nextInt <$> readTVar smgVar
+        writeTVar smgVar smg'
+        let denom = picosecondsToDiffTime 1000
+        let frac = toEnum (abs i `mod` 1000) / denom
+        pure $ mx * frac
+
+forgetPipeSTM :: IOLike m => LivePipesVar m -> PipeId -> STM m ()
+forgetPipeSTM tvar pid = modifyTVar tvar $ \lp@LivePipes{livePipes} ->
+    lp{livePipes = Map.delete pid livePipes}
