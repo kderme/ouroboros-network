@@ -25,7 +25,7 @@ import qualified GHC.Event as GHC (TimeoutKey, getSystemTimerManager,
                      registerTimeout, unregisterTimeout, updateTimeout)
 #endif
 
-import           Control.Monad.Class.MonadFork (MonadFork(..))
+import           Control.Monad.Class.MonadFork
 import           Control.Monad.Class.MonadSTM
 import           Control.Monad.Class.MonadThrow
 
