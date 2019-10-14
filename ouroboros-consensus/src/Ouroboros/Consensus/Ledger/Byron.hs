@@ -897,6 +897,7 @@ instance (ByronGiven, Typeable cfg, ConfigContainsGenesis cfg, NoUnexpectedThunk
       -- ^ This field is lazy on purpose so that the TxId is computed on
       -- demand.
     }
+    deriving (Eq)
 
   newtype GenTxId (ByronBlockOrEBB cfg) = ByronTxId { unByronTxId :: CC.UTxO.TxId }
     deriving (Eq, Ord)

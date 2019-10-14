@@ -51,6 +51,7 @@ extra-deps:
   - binary-0.8.7.0
   - generic-monoid-0.1.0.0
   - graphviz-2999.20.0.3
+  - hedgehog-quickcheck-0.1.1
   - quickcheck-state-machine-0.6.0
   - splitmix-0.0.2
   - tasty-hedgehog-1.0.0.1

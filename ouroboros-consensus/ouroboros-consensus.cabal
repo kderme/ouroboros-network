@@ -254,6 +254,7 @@ test-suite test-consensus
   other-modules:
                     Test.Consensus.BlockchainTime
                     Test.Consensus.ChainSyncClient
+                    Test.Consensus.Ledger.Byron
                     Test.Consensus.Mempool
                     Test.Consensus.Mempool.TestBlock
                     Test.Consensus.Mempool.TestTx
@@ -303,6 +304,7 @@ test-suite test-consensus
                     io-sim-classes,
                     io-sim,
 
+                    cborg,
                     containers,
                     contra-tracer,
                     cryptonite,
@@ -311,6 +313,7 @@ test-suite test-consensus
                     fingertree,
                     generics-sop,
                     graphviz,
+                    hedgehog-quickcheck,
                     mtl,
                     QuickCheck,
                     quickcheck-state-machine,

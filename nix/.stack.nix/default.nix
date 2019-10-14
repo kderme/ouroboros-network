@@ -6,6 +6,7 @@
         "binary" = (((hackage.binary)."0.8.7.0").revisions).default;
         "generic-monoid" = (((hackage.generic-monoid)."0.1.0.0").revisions).default;
         "graphviz" = (((hackage.graphviz)."2999.20.0.3").revisions).default;
+        "hedgehog-quickcheck" = (((hackage.hedgehog-quickcheck)."0.1.1").revisions).default;
         "quickcheck-state-machine" = (((hackage.quickcheck-state-machine)."0.6.0").revisions).default;
         "splitmix" = (((hackage.splitmix)."0.0.2").revisions).default;
         "tasty-hedgehog" = (((hackage.tasty-hedgehog)."1.0.0.1").revisions).default;
