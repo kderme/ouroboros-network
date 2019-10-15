@@ -50,7 +50,7 @@ import qualified Data.Set as Set
 import           Data.Typeable (Typeable)
 import           Data.Dynamic (Dynamic, toDyn, fromDynamic)
 
-import           Control.Monad (mapM_)
+import           Control.Monad (join, mapM_)
 import           Control.Exception
                    ( Exception(..), SomeException
                    , ErrorCall(..), throw, assert )
@@ -106,6 +106,7 @@ data SimA s a where
 
   Fork         :: SimM s () -> (ThreadId -> SimA s b) -> SimA s b
   GetThreadId  :: (ThreadId -> SimA s b) -> SimA s b
+  LabelThread  :: ThreadId -> String -> SimA s b -> SimA s b
 
   Atomically   :: STM  s a -> (a -> SimA s b) -> SimA s b
 
@@ -279,6 +280,7 @@ blockUninterruptible a = SimM (SetMaskState MaskedUninterruptible a)
 instance MonadThread (SimM s) where
   type ThreadId (SimM s) = ThreadId
   myThreadId       = SimM $ \k -> GetThreadId k
+  labelThread t l  = SimM $ \k -> LabelThread t l (k ())
 
 instance MonadFork (SimM s) where
   fork task        = SimM $ \k -> Fork task k
@@ -390,7 +392,8 @@ data Thread s a = Thread {
     threadBlocked :: !Bool,
     threadMasking :: !MaskingState,
     -- other threads blocked in a ThrowTo to us because we are or were masked
-    threadThrowTo :: ![(SomeException, ThreadId)]
+    threadThrowTo :: ![(SomeException, ThreadId)],
+    threadLabel   :: Maybe ThreadLabel
   }
 
 -- We hide the type @b@ here, so it's useful to bundle these two parts
@@ -418,7 +421,9 @@ newtype ThreadId  = ThreadId  Int deriving (Eq, Ord, Enum, Show)
 newtype TVarId    = TVarId    Int deriving (Eq, Ord, Enum, Show)
 newtype TimeoutId = TimeoutId Int deriving (Eq, Ord, Enum, Show)
 
-data Trace a = Trace !VTime !ThreadId !TraceEvent (Trace a)
+type ThreadLabel = String
+
+data Trace a = Trace !VTime !ThreadId !(Maybe ThreadLabel) !TraceEvent (Trace a)
              | TraceMainReturn    !VTime a             ![ThreadId]
              | TraceMainException !VTime SomeException ![ThreadId]
              | TraceDeadlock      !VTime               ![ThreadId]
@@ -456,7 +461,7 @@ selectTraceEvents
     -> [b]
 selectTraceEvents fn = go
   where
-    go (Trace _ _ ev trace) = case fn ev of
+    go (Trace _ _ _ ev trace) = case fn ev of
       Just x  -> x : go trace
       Nothing ->     go trace
     go (TraceMainException _ e _) = throw (FailureException e)
@@ -532,16 +537,17 @@ runSimStrictShutdown mainAction = traceResult True (runSimTrace mainAction)
 traceResult :: Bool -> Trace a -> Either Failure a
 traceResult strict = go
   where
-    go (Trace _ _ _ t)                  = go t
+    go (Trace _ _ _ _ t)                = go t
     go (TraceMainReturn _ _ tids@(_:_))
                                | strict = Left (FailureSloppyShutdown tids)
     go (TraceMainReturn _ x _)          = Right x
     go (TraceMainException _ e _)       = Left (FailureException e)
     go (TraceDeadlock   _   _)          = Left FailureDeadlock
 
-traceEvents :: Trace a -> [(VTime, ThreadId, TraceEvent)]
-traceEvents (Trace time tid event t) = (time, tid, event) : traceEvents t
-traceEvents _                        = []
+traceEvents :: Trace a -> [(VTime, ThreadId, Maybe ThreadLabel, TraceEvent)]
+traceEvents (Trace time tid tlbl event t) = (time, tid, tlbl, event)
+                                          : traceEvents t
+traceEvents _                             = []
 
 
 
@@ -557,7 +563,8 @@ runSimTraceST mainAction = schedule mainThread initialState
         threadControl = ThreadControl (runSimM mainAction) MainFrame,
         threadBlocked = False,
         threadMasking = Unmasked,
-        threadThrowTo = []
+        threadThrowTo = [],
+        threadLabel   = Just "main"
       }
 
 data SimState s a = SimState {
@@ -603,7 +610,8 @@ schedule :: Thread s a -> SimState s a -> ST s (Trace a)
 schedule thread@Thread{
            threadId      = tid,
            threadControl = ThreadControl action ctl,
-           threadMasking = maskst
+           threadMasking = maskst,
+           threadLabel   = tlbl
          }
          simstate@SimState {
            runqueue,
@@ -619,13 +627,13 @@ schedule thread@Thread{
       MainFrame ->
         -- the main thread is done, so we're done
         -- even if other threads are still running
-        return $ Trace time tid EventThreadFinished
+        return $ Trace time tid tlbl EventThreadFinished
                $ TraceMainReturn time x (Map.keys threads)
 
       ForkFrame -> do
         -- this thread is done
         trace <- deschedule Terminated thread simstate
-        return $ Trace time tid EventThreadFinished trace
+        return $ Trace time tid tlbl EventThreadFinished trace
 
       MaskFrame k maskst' ctl' -> do
         -- pop the control stack, restore thread-local state
@@ -643,22 +651,22 @@ schedule thread@Thread{
       Right thread' -> do
         -- We found a suitable exception handler, continue with that
         trace <- schedule thread' simstate
-        return (Trace time tid (EventThrow e) trace)
+        return (Trace time tid tlbl (EventThrow e) trace)
 
       Left isMain
         -- We unwound and did not find any suitable exception handler, so we
         -- have an unhandled exception at the top level of the thread.
         | isMain ->
           -- An unhandled exception in the main thread terminates the program
-          return (Trace time tid (EventThrow e) $
-                  Trace time tid (EventThreadUnhandled e) $
+          return (Trace time tid tlbl (EventThrow e) $
+                  Trace time tid tlbl (EventThreadUnhandled e) $
                   TraceMainException time e (Map.keys threads))
 
         | otherwise -> do
           -- An unhandled exception in any other thread terminates the thread
           trace <- deschedule Terminated thread simstate
-          return (Trace time tid (EventThrow e) $
-                  Trace time tid (EventThreadUnhandled e) trace)
+          return (Trace time tid tlbl (EventThrow e) $
+                  Trace time tid tlbl (EventThreadUnhandled e) trace)
 
     Catch action' handler k -> do
       -- push the failure and success continuations onto the control stack
@@ -669,12 +677,12 @@ schedule thread@Thread{
     Say msg k -> do
       let thread' = thread { threadControl = ThreadControl k ctl }
       trace <- schedule thread' simstate
-      return (Trace time tid (EventSay msg) trace)
+      return (Trace time tid tlbl (EventSay msg) trace)
 
     Output x k -> do
       let thread' = thread { threadControl = ThreadControl k ctl }
       trace <- schedule thread' simstate
-      return (Trace time tid (EventLog x) trace)
+      return (Trace time tid tlbl (EventLog x) trace)
 
     LiftST st k -> do
       x <- strictToLazyST st
@@ -694,7 +702,7 @@ schedule thread@Thread{
       trace <- schedule thread' simstate { timers   = timers'
                                          , nextVid  = succ nextVid
                                          , nextTmid = succ nextTmid }
-      return (Trace time tid (EventTimerCreated nextTmid nextVid expiry) trace)
+      return (Trace time tid tlbl (EventTimerCreated nextTmid nextVid expiry) trace)
 
     UpdateTimeout (Timeout _tvar tmid) d k -> do
           -- updating an expired timeout is a noop, so it is safe
@@ -705,13 +713,13 @@ schedule thread@Thread{
           timers' = snd (PSQ.alter updateTimeout_ tmid timers)
           thread' = thread { threadControl = ThreadControl k ctl }
       trace <- schedule thread' simstate { timers = timers' }
-      return (Trace time tid (EventTimerUpdated tmid expiry) trace)
+      return (Trace time tid tlbl (EventTimerUpdated tmid expiry) trace)
 
     CancelTimeout (Timeout _tvar tmid) k -> do
       let timers' = PSQ.delete tmid timers
           thread' = thread { threadControl = ThreadControl k ctl }
       trace <- schedule thread' simstate { timers = timers' }
-      return (Trace time tid (EventTimerCancelled tmid) trace)
+      return (Trace time tid tlbl (EventTimerCancelled tmid) trace)
 
     Fork a k -> do
       let tid'     = nextTid
@@ -721,12 +729,14 @@ schedule thread@Thread{
                                                             ForkFrame
                             , threadBlocked = False
                             , threadMasking = threadMasking thread
-                            , threadThrowTo = [] }
+                            , threadThrowTo = []
+                            , threadLabel   = Nothing
+                            }
           threads' = Map.insert tid' thread'' threads
       trace <- schedule thread' simstate { runqueue = runqueue ++ [tid']
                                          , threads  = threads'
                                          , nextTid  = succ nextTid }
-      return (Trace time tid (EventThreadForked tid') trace)
+      return (Trace time tid tlbl (EventThreadForked tid') trace)
 
     Atomically a k -> do
       res <- execAtomically tid nextVid (runSTM a)
@@ -744,10 +754,11 @@ schedule thread@Thread{
               -- as it is a fair policy (all runnable threads eventually run).
           trace <- deschedule Yield thread' simstate' { nextVid  = nextVid' }
           return $
-            Trace time tid (EventTxComitted written [nextVid..pred nextVid']) $
+            Trace time tid tlbl (EventTxComitted written [nextVid..pred nextVid']) $
             traceMany
-              [ (time, tid', EventTxWakeup vids)
+              [ (time, tid', tlbl', EventTxWakeup vids)
               | tid' <- unblocked
+              , let tlbl' = lookupThreadLabel tid' threads
               , vids <- maybeToList (List.lookup tid' wakeup) ]
               trace
 
@@ -755,15 +766,25 @@ schedule thread@Thread{
           -- schedule this thread to immediately raise the exception
           let thread' = thread { threadControl = ThreadControl (Throw e) ctl }
           trace <- schedule thread' simstate
-          return (Trace time tid EventTxAborted trace)
+          return (Trace time tid tlbl EventTxAborted trace)
 
         StmTxBlocked vids -> do
           trace <- deschedule Blocked thread simstate
-          return (Trace time tid (EventTxBlocked vids) trace)
+          return (Trace time tid tlbl (EventTxBlocked vids) trace)
 
     GetThreadId k -> do
       let thread' = thread { threadControl = ThreadControl (k tid) ctl }
       schedule thread' simstate
+
+    LabelThread tid' l k | tid' == tid -> do
+      let thread' = thread { threadControl = ThreadControl k ctl
+                           , threadLabel   = Just l }
+      schedule thread' simstate
+
+    LabelThread tid' l k -> do
+      let thread'  = thread { threadControl = ThreadControl k ctl }
+          threads' = Map.adjust (\t -> t { threadLabel = Just l }) tid' threads
+      schedule thread' simstate { threads = threads' }
 
     GetMaskState k -> do
       let thread' = thread { threadControl = ThreadControl (k maskst) ctl }
@@ -785,7 +806,7 @@ schedule thread@Thread{
       let thread' = thread { threadControl = ThreadControl (Throw e) ctl
                            , threadMasking = MaskedInterruptible }
       trace <- schedule thread' simstate
-      return (Trace time tid (EventThrowTo e tid) trace)
+      return (Trace time tid tlbl (EventThrowTo e tid) trace)
 
     ThrowTo e tid' k -> do
       let thread'   = thread { threadControl = ThreadControl k ctl }
@@ -799,8 +820,8 @@ schedule thread@Thread{
           let adjustTarget t = t { threadThrowTo = (e, tid) : threadThrowTo t }
               threads'       = Map.adjust adjustTarget tid' threads
           trace <- deschedule Blocked thread' simstate { threads = threads' }
-          return $ Trace time tid (EventThrowTo e tid')
-                 $ Trace time tid EventThrowToBlocked
+          return $ Trace time tid tlbl (EventThrowTo e tid')
+                 $ Trace time tid tlbl EventThrowToBlocked
                  $ trace
         else do
           -- The target thread has async exceptions unmasked, or is masked but
@@ -821,7 +842,7 @@ schedule thread@Thread{
               simstate'' = simstate' { threads = threads'' }
 
           trace <- schedule thread' simstate''
-          return $ Trace time tid (EventThrowTo e tid')
+          return $ Trace time tid tlbl (EventThrowTo e tid')
                  $ trace
 
 threadInterruptible :: Thread s a -> Bool
@@ -854,9 +875,10 @@ deschedule Interruptable thread@Thread {
                            threadId      = tid,
                            threadControl = ThreadControl _ ctl,
                            threadMasking = Unmasked,
-                           threadThrowTo = (e, tid') : etids
+                           threadThrowTo = (e, tid') : etids,
+                           threadLabel   = tlbl
                          }
-                         simstate@SimState{ curTime = time } = do
+                         simstate@SimState{ curTime = time, threads } = do
 
     -- We're unmasking, but there are pending blocked async exceptions.
     -- So immediately raise the exception and unblock the blocked thread
@@ -867,9 +889,10 @@ deschedule Interruptable thread@Thread {
         (unblocked,
          simstate') = unblockThreads [tid'] simstate
     trace <- schedule thread' simstate'
-    return $ Trace time tid (EventThrowToUnmasked tid')
-           $ traceMany [ (time, tid'', EventThrowToWakeup)
-                       | tid'' <- unblocked ]
+    return $ Trace time tid tlbl (EventThrowToUnmasked tid')
+           $ traceMany [ (time, tid'', tlbl'', EventThrowToWakeup)
+                       | tid'' <- unblocked
+                       , let tlbl'' = lookupThreadLabel tid'' threads ]
              trace
 
 deschedule Interruptable thread simstate =
@@ -891,7 +914,7 @@ deschedule Blocked thread simstate@SimState{threads} =
         threads' = Map.insert (threadId thread') thread' threads in
     reschedule simstate { threads = threads' }
 
-deschedule Terminated thread simstate@SimState{ curTime = time } = do
+deschedule Terminated thread simstate@SimState{ curTime = time, threads } = do
     -- This thread is done. If there are other threads blocked in a
     -- ThrowTo targeted at this thread then we can wake them up now.
     let wakeup      = map snd (reverse (threadThrowTo thread))
@@ -899,7 +922,9 @@ deschedule Terminated thread simstate@SimState{ curTime = time } = do
          simstate') = unblockThreads wakeup simstate
     trace <- reschedule simstate'
     return $ traceMany
-               [ (time, tid', EventThrowToWakeup) | tid' <- unblocked ]
+               [ (time, tid', tlbl', EventThrowToWakeup)
+               | tid' <- unblocked
+               , let tlbl' = lookupThreadLabel tid' threads ]
                trace
 
 -- When there is no current running thread but the runqueue is non-empty then
@@ -932,10 +957,11 @@ reschedule simstate@SimState{ runqueue = [], threads, timers, curTime = time } =
         trace <- reschedule simstate' { curTime = time'
                                       , timers  = timers' }
         return $
-          traceMany ([ (time', ThreadId (-1), EventTimerExpired tmid)
+          traceMany ([ (time', ThreadId (-1), Just "timer", EventTimerExpired tmid)
                      | tmid <- tmids ]
-                  ++ [ (time', tid', EventTxWakeup vids)
+                  ++ [ (time', tid', tlbl', EventTxWakeup vids)
                      | tid' <- unblocked
+                     , let tlbl' = lookupThreadLabel tid' threads
                      , vids <- maybeToList (List.lookup tid' wakeup) ])
                     trace
   where
@@ -1017,10 +1043,14 @@ removeMinimums = \psq ->
           | p == p' -> collectAll (k:ks) p (x:xs) psq'
         _           -> (reverse ks, p, reverse xs, psq)
 
-traceMany :: [(VTime, ThreadId, TraceEvent)] -> Trace a -> Trace a
+traceMany :: [(VTime, ThreadId, Maybe ThreadLabel, TraceEvent)]
+          -> Trace a -> Trace a
 traceMany []                      trace = trace
-traceMany ((time, tid, event):ts) trace =
-    Trace time tid event (traceMany ts trace)
+traceMany ((time, tid, tlbl, event):ts) trace =
+    Trace time tid tlbl event (traceMany ts trace)
+
+lookupThreadLabel :: ThreadId -> Map ThreadId (Thread s a) -> Maybe ThreadLabel
+lookupThreadLabel tid threads = join (threadLabel <$> Map.lookup tid threads)
 
 
 --
