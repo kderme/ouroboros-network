@@ -45,6 +45,12 @@ import           Data.Typeable                  ( Typeable
                                                 , typeRep
                                                 )
 import           GHC.Generics                   ( Generic )
+import           LedgerState                    ( DState(..)
+                                                , DPState(..)
+                                                , NewEpochState(..)
+                                                , LedgerState(..)
+                                                , esPp
+                                                )
 import           Ouroboros.Consensus.Block
 import           Ouroboros.Consensus.Ledger.Abstract
 import           Ouroboros.Consensus.Protocol.Abstract
@@ -151,8 +157,6 @@ instance StandardHash (ShelleyBlock cfg)
 data CombinedLedgerState = CombinedLedgerState
   { combinedLedgerStateBHEAD :: STS.State (STS.BHEAD HASH DSIGN KES VRF)
   , combinedLedgerStateBBODY :: STS.State (STS.BBODY HASH DSIGN KES VRF)
-    -- | Candidate nonce.
-  , combinedLedgerStateNonce :: Nonce
   } deriving (Eq, Show)
 
 -- | See note on @CombinedLedgerState@
@@ -163,9 +167,8 @@ data CombinedLedgerError =
 
 instance UpdateLedger (ShelleyBlock cfg) where
 
-  data LedgerState (ShelleyBlock cfg) = ShelleyLedgerState
+  newtype LedgerState (ShelleyBlock cfg) = ShelleyLedgerState
     { shelleyLedgerState :: CombinedLedgerState
-
     } deriving (Eq, Show, Generic)
   type LedgerError (ShelleyBlock cfg) = CombinedLedgerError
 
@@ -175,7 +178,7 @@ instance UpdateLedger (ShelleyBlock cfg) where
 -- TODO extract the needed node config
   ledgerConfigView EncNodeConfig{} = undefined
 
-  applyChainTick (ShelleyLedgerConfig _) slotNo (ShelleyLedgerState (CombinedLedgerState bhState _ _))
+  applyChainTick (ShelleyLedgerConfig _) slotNo (ShelleyLedgerState (CombinedLedgerState bhState _))
     = applySTS @STS.BHEAD $ TRC (env, bhState, slotNo)
 
 {-------------------------------------------------------------------------------
@@ -193,3 +196,18 @@ instance Typeable cfg
   => HeaderSupportsTPraos TPraosStandardCrypto (Header (ShelleyBlock cfg)) where
 
   headerToBHeader _ (ShelleyHeader hdr _hash) = hdr
+
+instance ProtocolLedgerView (ShelleyBlock cfg) where
+  protocolLedgerView _nc (ShelleyLedgerState ls) = TPraosLedgerView
+    { tpraosLedgerViewPoolDistr       = nesPd hs
+    , tpraosLedgerViewProtParams      = esPp . nesEs $ hs
+    , tpraosLedgerViewDelegationMap   = _dms . _dstate . _delegationState $ lds
+    , tpraosLedgerViewEpochNonce      = nesEta0 hs
+    , tpraosLedgerViewOverlaySchedule = nesOsched hs
+    }
+   where
+    hs = combinedLedgerStateBHEAD ls
+    (STS.BbodyState lds _) = combinedLedgerStateBBODY ls
+
+  -- TODO Implement this!
+  anachronisticProtocolLedgerView = undefined
