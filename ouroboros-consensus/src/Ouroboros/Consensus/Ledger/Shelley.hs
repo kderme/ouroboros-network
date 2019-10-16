@@ -201,7 +201,7 @@ instance ProtocolLedgerView (ShelleyBlock cfg) where
   protocolLedgerView _nc (ShelleyLedgerState ls) = TPraosLedgerView
     { tpraosLedgerViewPoolDistr       = nesPd hs
     , tpraosLedgerViewProtParams      = esPp . nesEs $ hs
-    , tpraosLedgerViewDelegationMap   = _dms . _dstate . _delegationState $ lds
+    , tpraosLedgerViewDelegationMap   = _genDelegs . _dstate . _delegationState $ lds
     , tpraosLedgerViewEpochNonce      = nesEta0 hs
     , tpraosLedgerViewOverlaySchedule = nesOsched hs
     }

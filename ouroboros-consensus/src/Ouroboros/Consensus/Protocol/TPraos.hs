@@ -53,6 +53,7 @@ import           Cardano.Crypto.VRF.Class
 import           Cardano.Prelude (NoUnexpectedThunks(..))
 import           Ouroboros.Network.Block (HasHeader (..), SlotNo (..))
 import           Ouroboros.Consensus.Protocol.Abstract
+import           Ouroboros.Consensus.Protocol.Signed
 import qualified Ouroboros.Consensus.Protocol.TPraos.ChainState as ChainState
 import           Ouroboros.Consensus.Protocol.TPraos.Crypto
 import           Ouroboros.Consensus.Protocol.TPraos.Util
