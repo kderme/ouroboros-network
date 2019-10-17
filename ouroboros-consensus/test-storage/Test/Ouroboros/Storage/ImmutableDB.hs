@@ -18,8 +18,7 @@ import           Data.Word (Word64)
 
 import qualified Test.Ouroboros.Storage.ImmutableDB.CumulEpochSizes as CumulEpochSizes
 import qualified Test.Ouroboros.Storage.ImmutableDB.StateMachine as StateMachine
-import           Test.Ouroboros.Storage.ImmutableDB.TestBlock hiding (tests)
-import qualified Test.Ouroboros.Storage.ImmutableDB.TestBlock as TestBlock
+import           Test.Ouroboros.Storage.TestBlock
 import           Test.Ouroboros.Storage.Util
 
 import           Test.QuickCheck
@@ -27,6 +26,8 @@ import           Test.QuickCheck.Monadic (monadicIO, run)
 import           Test.Tasty (TestTree, testGroup)
 import           Test.Tasty.HUnit
 import           Test.Tasty.QuickCheck (testProperty)
+
+import           Ouroboros.Network.Block (blockHash)
 
 import           Ouroboros.Consensus.Util.IOLike
 
@@ -39,7 +40,7 @@ import           Ouroboros.Storage.ImmutableDB.Index
 import           Ouroboros.Storage.ImmutableDB.Layout
 import           Ouroboros.Storage.ImmutableDB.SlotOffsets (SlotOffsets)
 import qualified Ouroboros.Storage.ImmutableDB.SlotOffsets as SlotOffsets
-import           Ouroboros.Storage.ImmutableDB.Util (tryImmDB)
+import           Ouroboros.Storage.ImmutableDB.Util (epochFileParser, tryImmDB)
 import           Ouroboros.Storage.Util (decodeIndexEntryAt)
 import           Ouroboros.Storage.Util.ErrorHandling (ErrorHandling)
 import qualified Ouroboros.Storage.Util.ErrorHandling as EH
@@ -60,7 +61,6 @@ tests = testGroup "ImmutableDB"
     , testCase     "ReadFutureSlotError equivalence" test_ReadFutureSlotErrorEquivalence
     , testCase     "Starting a new epoch pads the previous epoch's index" test_startNewEpochPadsTheIndexFile
     , testCase     "openDB with an empty index file" test_openDBEmptyIndexFileEquivalence
-    , testCase     "Reopen the database" test_reopenDBEquivalence
     , testCase     "closeDB is idempotent" test_closeDBIdempotentEquivalence
     , testCase     "appendBinaryBlob after closeDB throws a ClosedDBError" test_closeDBAppendBinaryBlobEquivalence
     , testGroup "Index"
@@ -72,7 +72,6 @@ tests = testGroup "ImmutableDB"
       ]
     , testCase     "reconstructSlotOffsets" test_reconstructSlotOffsets
     , testCase     "reconstructSlotOffsets empty slots" test_reconstructSlotOffsets_empty_slots
-    , TestBlock.tests
     , StateMachine.tests
     , CumulEpochSizes.tests
     ]
@@ -81,17 +80,26 @@ tests = testGroup "ImmutableDB"
 fixedEpochSize :: EpochSize
 fixedEpochSize = 10
 
-type Hash = TestBlock
+type Hash = TestHeaderHash
 
 -- Shorthand
 openTestDB :: (HasCallStack, IOLike m)
            => HasFS m h
            -> ErrorHandling ImmutableDBError m
            -> m (ImmutableDB Hash m)
-openTestDB hasFS err =
-    openDB S.decode S.encode hasFS err (fixedSizeEpochInfo fixedEpochSize) ValidateMostRecentEpoch parser nullTracer
+openTestDB hasFS err = openDB
+    S.decode
+    S.encode
+    hasFS
+    err
+    (fixedSizeEpochInfo fixedEpochSize)
+    ValidateMostRecentEpoch
+    parser
+    nullTracer
   where
-    parser = TestBlock.testBlockEpochFileParser' hasFS
+    parser = epochFileParser hasFS (const <$> S.decode) isEBB
+    isEBB b | testBlockIsEBB b = Just (blockHash b)
+            | otherwise        = Nothing
 
 -- Shorthand
 withTestDB :: (HasCallStack, IOLike m)
@@ -136,14 +144,6 @@ test_openDBEmptyIndexFileEquivalence =
       hClose h2
 
       withTestDB hasFS err getTip
-
-test_reopenDBEquivalence :: Assertion
-test_reopenDBEquivalence =
-    apiEquivalenceImmDB (expectImmDBResult (@?= Tip (Block 5))) $ \hasFS err -> do
-      withTestDB hasFS err $ \db ->
-        appendBinaryBlob db 5 (testBlockToBuilder (TestBlock 5))
-      withTestDB hasFS err $ \db ->
-        getTip db
 
 test_closeDBIdempotentEquivalence :: Assertion
 test_closeDBIdempotentEquivalence =

@@ -209,7 +209,9 @@ addBlock :: forall blk. ProtocolLedgerView blk
 addBlock cfg blk m
     -- If the block is as old as the tip of the ImmutableDB, i.e. older than
     -- @k@, we ignore it, as we can never switch to it.
-  | Block.blockNo blk <= immutableBlockNo secParam m = m
+  | Block.blockNo blk <= immutableBlockNo secParam m
+  , not addingGenesisEBBToEmptyDB
+  = m
   | otherwise = Model {
       blocks        = blocks'
     , cps           = CPS.switchFork newChain (cps m)
@@ -221,6 +223,9 @@ addBlock cfg blk m
     }
   where
     secParam = protocolSecurityParam cfg
+
+    addingGenesisEBBToEmptyDB = tipPoint m == GenesisPoint
+                             && Block.blockNo blk == Block.genesisBlockNo
 
     blocks' :: Map (HeaderHash blk) blk
     blocks' = Map.insert (Block.blockHash blk) blk (blocks m)
