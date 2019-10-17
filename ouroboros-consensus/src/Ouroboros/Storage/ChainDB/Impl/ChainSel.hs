@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns         #-}
 {-# LANGUAGE FlexibleContexts     #-}
 {-# LANGUAGE GADTs                #-}
 {-# LANGUAGE LambdaCase           #-}
@@ -27,7 +28,7 @@ import           Control.Monad.Except
 import           Control.Monad.Trans.State.Strict
 import           Data.Foldable (foldl')
 import           Data.Function (on)
-import           Data.List (sortBy)
+import           Data.List (intercalate, sortBy)
 import           Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NE
 import           Data.Map.Strict (Map)
@@ -63,6 +64,11 @@ import qualified Ouroboros.Storage.ChainDB.Impl.Reader as Reader
 import           Ouroboros.Storage.ChainDB.Impl.Types
 import           Ouroboros.Storage.ChainDB.Impl.VolDB (VolDB)
 import qualified Ouroboros.Storage.ChainDB.Impl.VolDB as VolDB
+
+import qualified Cardano.Prelude as CP
+import           Data.IORef
+import qualified Ouroboros.Storage.LedgerDB.InMemory as InMem
+import           System.IO.Unsafe
 
 -- | Perform the initial chain selection based on the tip of the ImmutableDB
 -- and the contents of the VolatileDB.
@@ -445,9 +451,11 @@ addBlock cdb@CDB{..} b = do
           -- The chain must be changed in the meantime such that our chain is
           -- no longer preferred.
           _ -> return (curChain, False)
-      trace $ if switched
-              then SwitchedToChain  curChain newChain
-              else ChainChangedInBg curChain newChain
+      if switched then do
+        trace $ SwitchedToChain curChain newChain
+        traceSize newLedger
+      else do
+        trace $ ChainChangedInBg curChain newChain
 
     -- | Build a cache from the headers in the fragment.
     cacheHeaders :: AnchoredFragment (Header blk)
@@ -486,6 +494,28 @@ addBlock cdb@CDB{..} b = do
       $ mapM (getKnownHeaderThroughCache cdbVolDB)
       $ NE.toList hashes <> suffixHashes
 
+traceSizeCounter :: IORef Int
+{-# NOINLINE traceSizeCounter #-}
+traceSizeCounter = unsafePerformIO $ newIORef 0
+
+traceSize :: (Monad m, ProtocolLedgerView blk) => LgrDB.LedgerDB blk -> m ()
+traceSize !db = unsafePerformIO $ do
+    count <- readIORef traceSizeCounter
+    writeIORef traceSizeCounter (count + 1)
+    when (count `mod` 100 == 0) $ do
+      let !ledger = InMem.ledgerDbCurrent db
+      dbSize     <- CP.computeHeapSize db
+      ledgerSize <- CP.computeHeapSize ledger
+  --    ledgerHasThunks <- noUnexpectedThunks [] ledger
+  --    dbHasThunks     <- noUnexpectedThunks [] db
+      appendFile "/tmp/ledgerdb.log" $ (intercalate "\t" [
+          show (InMem.ledgerDbTip db)
+        , show ledgerSize
+  --      , show ledgerHasThunks
+        , show dbSize
+  --      , show dbHasThunks
+        ] ++ "\n")
+    return $ return ()
 
 -- | Check whether the header for the hash is in the cache, if not, get
 -- the corresponding header from the VolatileDB and store it in the cache.

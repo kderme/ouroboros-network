@@ -321,7 +321,7 @@ getCurrentState LgrDB{..} = LedgerDB.ledgerDbCurrent <$> readTVar varDB
 -- 'LedgerDB.ledgerDbSwitch' or 'LedgerDB.ledgerDbPushMany' on the current
 -- 'LedgerDB'.
 setCurrent :: IOLike m => LgrDB m blk -> LedgerDB blk -> STM m ()
-setCurrent LgrDB{..} = writeTVar $! varDB
+setCurrent LgrDB{..} = writeTVar varDB
 
 currentPoint :: UpdateLedger blk => LedgerDB blk -> Point blk
 currentPoint = ledgerTipPoint
