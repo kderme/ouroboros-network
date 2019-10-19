@@ -254,19 +254,18 @@ getBlockImpl :: (IOLike m, Ord blockId)
              -> blockId
              -> m (Maybe ByteString)
 getBlockImpl env@VolatileDBEnv{..} slot =
-    modifyState env $ \hasFS@HasFS{..} st@InternalState{..} ->
+    withState env $ \hasFS@HasFS{..} InternalState{..} ->
       case Map.lookup slot _currentRevMap of
-        Nothing -> return (st, Nothing)
+        Nothing -> return Nothing
         Just InternalBlockInfo {..} -> do
           bs <- case FileInfo.getHandle <$> Index.lookup ibFileId _currentMap of
             Nothing ->
               -- All files should be open.
               throwError _dbErr $ UnexpectedError $ FileNotFound ibFile
-            Just hndl -> do
-              -- TODO: use pread when available.
-              _ <- hSeek hndl AbsoluteSeek (fromIntegral ibSlotOffset)
-              hGetExactly hasFS hndl $ unBlockSize ibBlockSize
-          return (st, Just bs)
+            Just hndl ->
+              hGetExactlyAt hasFS hndl (unBlockSize ibBlockSize)
+                                       (fromIntegral ibSlotOffset)
+          return $ Just bs
 
 -- | This function follows the approach:
 -- (1) hPut bytes to the file
@@ -472,9 +471,9 @@ reOpenFile :: forall m h blockId
            -> InternalState blockId h
            -> m (InternalState blockId h)
 reOpenFile HasFS{..} _err VolatileDBEnv{..} st@InternalState{..} = do
-    -- To allow concurrent reades, we will need to close the previous read Handle
-    -- and open a new one. In this way, any pending read operation will fail
-    -- @with a read: FHandle closed@ user error. If we don't close the handle
+    -- We need to close the previous read Handle and open a new one.
+    -- In this way, any pending read operation will fail with a
+    -- @read: FHandle closed@ user error. If we don't close the handle
     -- a reader may read from a offset bigger than the size of the file,
     -- which we shouldn't allow.
     forM_ (FileInfo.getHandle <$> Index.lookup _currentWriteId _currentMap) hClose
@@ -534,7 +533,7 @@ mkInternalState hasFS@HasFS{..} err parser n files =
                , newIndex
                , Index.insert newIndex (FileInfo.empty hndlRead) mp
                , FileSize 0
-               , hndl)
+               , hndl )
       where
         file = filePath newIndex
 
@@ -550,7 +549,7 @@ mkInternalState hasFS@HasFS{..} err parser n files =
       -- read with truncate.
       --
       withFile hasFS file (AppendMode AllowExisting) $ \hndl ->
-        hTruncate hndl (fromIntegral offset)
+        hTruncate hndl offset
 
     -- | For each file in the db, this function parses, updates the
     -- internal state and calls itself for the rest of the files.
@@ -628,6 +627,49 @@ mkInternalState hasFS@HasFS{..} err parser n files =
               then lessThanN
               else (fd, file, FileSize offset) : lessThanN
 
+withState :: forall blockId m r. (HasCallStack, IOLike m)
+          => VolatileDBEnv m blockId
+          -> (forall h
+             .  HasFS m h
+             -> InternalState blockId h
+             -> m r
+             )
+          -> m r
+withState VolatileDBEnv{_dbHasFS = hasFS :: HasFS m h, ..} action = do
+    (mr, ()) <- generalBracket open (const close)
+                  (tryVolDB hasFsErr _dbErr . access)
+    case mr of
+      Left  e -> throwError e
+      Right r -> return r
+  where
+    ErrorHandling{..} = _dbErr
+    HasFS{..}         = hasFS
+
+    open :: m (OpenOrClosed blockId h)
+    open = readMVar _dbInternalState
+
+    close :: ExitCase (Either (VolatileDBError blockId) r) -> m ()
+    close ec = case ec of
+      -- Restore the original state in case of an abort.
+      ExitCaseAbort         -> return ()
+      -- In case of an exception, close the DB for safety.
+      ExitCaseException _ex -> do
+        st <- updateMVar _dbInternalState (VolatileDbClosed,)
+        closeAllHandles hasFS st
+      -- In case of success, update to the newest state.
+      ExitCaseSuccess (Right _) ->
+        return ()
+      -- In case of an 'UnexpectedError' (not an exception), close the DB
+      -- for safety.
+      ExitCaseSuccess (Left UnexpectedError {}) -> do
+        st <- updateMVar _dbInternalState (VolatileDbClosed,)
+        closeAllHandles hasFS st
+      ExitCaseSuccess (Left UserError {}) -> return ()
+
+    access :: OpenOrClosed blockId h -> m r
+    access VolatileDbClosed          = throwError $ UserError ClosedDBError
+    access (VolatileDbOpen oldState) = action hasFS oldState
+
 -- | NOTE: This is safe in terms of throwing FsErrors.
 modifyState :: forall blockId m r. (HasCallStack, IOLike m)
             => VolatileDBEnv m blockId
@@ -663,10 +705,12 @@ modifyState VolatileDBEnv{_dbHasFS = hasFS :: HasFS m h, ..} action = do
       -- In case of success, update to the newest state.
       ExitCaseSuccess (Right (newState, _)) ->
         putMVar _dbInternalState (VolatileDbOpen newState)
-      -- In case of an error (not an exception), close the DB for safety.
-      ExitCaseSuccess (Left _) -> do
+      -- In case of an 'UnexpectedError' (not an exception), close the DB
+      -- for safety.
+      ExitCaseSuccess (Left UnexpectedError {}) -> do
         putMVar _dbInternalState VolatileDbClosed
         closeAllHandles hasFS mst
+      ExitCaseSuccess (Left UserError {}) -> putMVar _dbInternalState mst
 
     mutation :: OpenOrClosed blockId h
              -> m (InternalState blockId h, r)
