@@ -88,9 +88,9 @@ module Ouroboros.Storage.VolatileDB.Impl
       -- * tests only
     , VolatileDBEnv(..)
     , InternalState(..)
-    , OpenOrClosed(..)
     , filePath
     , openDBFull
+    , withState
     ) where
 
 import           Control.Monad
