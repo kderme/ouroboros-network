@@ -77,9 +77,9 @@ parseAllFds = mapM $ \f -> (,f) <$> parseFd f
 
 -- | When parsing fails, we abort with the corresponding parse error.
 findLastFd :: forall blockId.
-              Set FsPath
+              [FsPath]
            -> Either (VolatileDBError blockId) (Maybe FileId)
-findLastFd = fmap safeMaximum . mapM parseFd . Set.toList
+findLastFd = fmap safeMaximum . mapM parseFd
 
 filePath :: FileId -> FsPath
 filePath fd = mkFsPath ["blocks-" ++ show fd ++ ".dat"]
