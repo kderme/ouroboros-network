@@ -33,6 +33,7 @@
           (hsPkgs.cardano-ledger)
           (hsPkgs.cardano-prelude)
           (hsPkgs.cborg)
+          (hsPkgs.concurrent-extra)
           (hsPkgs.containers)
           (hsPkgs.cryptonite)
           (hsPkgs.deepseq)
