@@ -11,13 +11,16 @@
 
 module Ouroboros.Consensus.Util.ResourceRegistry (
     ResourceRegistry -- opaque
+  , ResourceKey      -- opaque
     -- * Creating and releasing the registry itself
   , withRegistry
   , registryThread
+  , withUnsafeRegistry
     -- * Allocating and releasing regular resources
   , allocate
   , release
   , unsafeRelease
+  , unsafeReleaseAll
     -- * Threads
   , Thread -- opaque
   , threadId
@@ -29,6 +32,7 @@ module Ouroboros.Consensus.Util.ResourceRegistry (
   , forkLinkedThread
     -- * Combinators primarily for testing
   , unsafeNewRegistry
+  , newUnsafeRegistry
   , closeRegistry
   , countResources
   ) where
@@ -277,14 +281,21 @@ import           Ouroboros.Consensus.Util.Orphans ()
 -- the scope of the resources created within, and hence their maximum lifetimes.
 data ResourceRegistry m = ResourceRegistry {
       -- | Context in which the registry was created
-      registryContext :: !(Context m)
+      registryContext     :: !(Context m)
+
+      -- | When this flag is not set, no checks related to threads are done
+      -- and 'forkThread' can't be used. In this case, the registry is unsafe.
+    , registryCheckThread :: !Bool
 
       -- | Registry state
-    , registryState   :: !(StrictTVar m (RegistryState m))
+    , registryState       :: !(StrictTVar m (RegistryState m))
     }
   deriving (Generic)
 
 deriving instance IOLike m => NoUnexpectedThunks (ResourceRegistry m)
+
+instance Show (ResourceRegistry m) where
+  show _ = "<<resource registry>>"
 
 {-------------------------------------------------------------------------------
   Internal: registry state
@@ -336,6 +347,7 @@ data RegistryStatus =
 --
 -- Resource keys are tied to a particular registry.
 data ResourceKey m = ResourceKey !(ResourceRegistry m) !ResourceId
+  deriving (Show, Generic, NoUnexpectedThunks)
 
 -- | Resource ID
 --
@@ -430,6 +442,9 @@ close closeCallStack = unlessClosed $ do
     modify $ \st -> st {registryStatus = RegistryClosed closeCallStack}
     gets $ Map.keysSet . registryResources
 
+getKeys :: State (RegistryState m) (Either PrettyCallStack (Set ResourceId))
+getKeys = unlessClosed $ gets $ Map.keysSet . registryResources
+
 -- | Convenience function for updating the registry state
 updateState :: forall m a. IOLike m
             => ResourceRegistry m
@@ -482,21 +497,36 @@ unsafeNewRegistry = do
     context  <- captureContext
     stateVar <- newTVarM initState
     return ResourceRegistry {
-          registryContext = context
-        , registryState   = stateVar
+          registryContext     = context
+        , registryCheckThread = True
+        , registryState       = stateVar
         }
-  where
-    initState :: RegistryState m
-    initState = RegistryState {
-          registryThreads   = KnownThreads Set.empty
-        , registryResources = Map.empty
-        , registryNextKey   = ResourceId 1
-        , registryStatus    = RegistryOpen
-        }
+
+initState :: RegistryState m
+initState = RegistryState {
+      registryThreads   = KnownThreads Set.empty
+    , registryResources = Map.empty
+    , registryNextKey   = ResourceId 1
+    , registryStatus    = RegistryOpen
+    }
+
+-- | Like 'unsafeNewRegistry', but creates an unsafe registry, in the sense
+-- that any thread can use it. 'forkThread' can't be called for an unsafe
+-- registry.
+newUnsafeRegistry :: (IOLike m, HasCallStack) => m (ResourceRegistry m)
+newUnsafeRegistry = do
+    context  <- captureContext
+    stateVar <- newTVarM initState
+    return ResourceRegistry {
+        registryContext     = context
+      , registryCheckThread = False
+      , registryState       = stateVar
+      }
 
 -- | Close the registry
 --
--- This can only be called from the same thread that created the registry.
+-- This can only be called from the same thread that created the registry,
+-- unless it is an unsafe registry.
 -- This is a no-op if the registry is already closed.
 --
 -- This entire function runs with exceptions masked, so that we are not
@@ -516,11 +546,12 @@ unsafeNewRegistry = do
 closeRegistry :: (IOLike m, HasCallStack) => ResourceRegistry m -> m ()
 closeRegistry rr = mask_ $ do
     context <- captureContext
-    unless (contextThreadId context == contextThreadId (registryContext rr)) $
-      throwM $ ResourceRegistryClosedFromWrongThread {
-          resourceRegistryCreatedIn = registryContext rr
-        , resourceRegistryUsedIn    = context
-        }
+    when (registryCheckThread rr) $
+      unless (contextThreadId context == contextThreadId (registryContext rr)) $
+        throwM $ ResourceRegistryClosedFromWrongThread {
+            resourceRegistryCreatedIn = registryContext rr
+          , resourceRegistryUsedIn    = context
+          }
 
     -- Close the registry so that we cannot allocate any further resources
     alreadyClosed <- updateState rr $ close (contextCallStack context)
@@ -540,23 +571,18 @@ closeRegistry rr = mask_ $ do
        case prioritize exs of
          Nothing -> return ()
          Just e  -> throwM e
-  where
-    newToOld :: Set ResourceId -> [ResourceId]
-    newToOld = Set.toDescList -- depends on 'Ord' instance
-
-    prioritize :: [Either SomeException ()] -> Maybe SomeException
-    prioritize =
-          (\(asyncEx, otherEx) -> listToMaybe asyncEx <|> listToMaybe otherEx)
-        . first catMaybes
-        . unzip
-        . map (\e -> (asyncExceptionFromException e, e))
-        . lefts
 
 -- | Create a new registry
 --
 -- See documentation of 'ResourceRegistry' for a detailed discussion.
 withRegistry :: IOLike m => (ResourceRegistry m -> m a) -> m a
 withRegistry = bracket unsafeNewRegistry closeRegistry
+
+-- | Like 'withRegistry' but creates an unsafe registry, in the sense
+-- that any thread can use it. 'forkThread' can't be called for an unsafe
+-- registry.
+withUnsafeRegistry :: IOLike m => (ResourceRegistry m -> m a) -> m a
+withUnsafeRegistry = bracket newUnsafeRegistry closeRegistry
 
 {-------------------------------------------------------------------------------
   Simple queries on the registry
@@ -592,10 +618,11 @@ allocate :: forall m a. (IOLike m, HasCallStack)
          -> m (ResourceKey m, a)
 allocate rr alloc free = do
     context <- captureContext
-    ensureKnownThread rr context
+    when (registryCheckThread rr) $
+      ensureKnownThread rr context
     -- We check if the registry has been closed when we allocate the key, so
     -- that we can avoid needlessly allocating the resource.
-    mKey <- updateState rr $ allocKey
+    mKey <- updateState rr allocKey
     case mKey of
       Left closed ->
         throwRegistryClosed context closed
@@ -640,8 +667,9 @@ allocate rr alloc free = do
 -- Releasing an already released resource is a no-op.
 release :: IOLike m => ResourceKey m -> m ()
 release key@(ResourceKey rr _) = do
-    context <- captureContext
-    ensureKnownThread rr context
+    when (registryCheckThread rr) $ do
+      context <- captureContext
+      ensureKnownThread rr context
     unsafeRelease key
 
 -- | Unsafe version of 'release'
@@ -657,10 +685,32 @@ release key@(ResourceKey rr _) = do
 -- This function should only be used if the above situation can be ruled out
 -- or handled by other means.
 unsafeRelease :: IOLike m => ResourceKey m -> m ()
-unsafeRelease (ResourceKey rr rid) = do
-    mask_ $ do
-      mResource <- updateState rr $ removeResource rid
-      mapM_ releaseResource mResource
+unsafeRelease (ResourceKey rr rid) = mask_ $ do
+    mResource <- updateState rr $ removeResource rid
+    mapM_ releaseResource mResource
+
+-- | Releases all resources of the registry. No thread check is performed.
+unsafeReleaseAll :: (IOLike m, HasCallStack) => ResourceRegistry m -> m ()
+unsafeReleaseAll rr = mask_ $ do
+    alreadyClosed <- updateState rr getKeys
+    case alreadyClosed of
+      Left _ -> return ()
+      Right keys -> do
+        exs <- forM (newToOld keys) $ try . unsafeRelease . ResourceKey rr
+        case prioritize exs of
+          Nothing -> return ()
+          Just e  -> throwM e
+
+newToOld :: Ord a => Set a -> [a]
+newToOld = Set.toDescList
+
+prioritize :: [Either SomeException ()] -> Maybe SomeException
+prioritize =
+      (\(asyncEx, otherEx) -> listToMaybe asyncEx <|> listToMaybe otherEx)
+    . first catMaybes
+    . unzip
+    . map (\e -> (asyncExceptionFromException e, e))
+    . lefts
 
 {-------------------------------------------------------------------------------
   Threads
@@ -709,8 +759,14 @@ forkThread :: forall m a. (IOLike m, HasCallStack)
            => ResourceRegistry m
            -> m a
            -> m (Thread m a)
-forkThread rr body = snd <$>
-    allocate rr (\key -> mkThread key <$> async (body' key)) cancelThread
+forkThread rr body = do
+  unless (registryCheckThread rr) $ do
+    context  <- captureContext
+    throwM $ ResourceRegistryDoesNotSupportFork {
+        resourceRegistryCreatedIn = registryContext rr
+      , resourceRegistryUsedIn    = context
+      }
+  snd <$> allocate rr (\key -> mkThread key <$> async (body' key)) cancelThread
   where
     mkThread :: ResourceId -> Async m a -> Thread m a
     mkThread rid child = Thread {
@@ -802,6 +858,15 @@ data ResourceRegistryThreadException =
 
     -- | Registry closed from different threat than that created it
   | forall m. IOLike m => ResourceRegistryClosedFromWrongThread {
+          -- | Information about the context in which the registry was created
+          resourceRegistryCreatedIn :: !(Context m)
+
+          -- | The context in which it was used
+        , resourceRegistryUsedIn    :: !(Context m)
+        }
+
+    -- | Registry is unsafe and does not support fork
+  | forall m. IOLike m => ResourceRegistryDoesNotSupportFork {
           -- | Information about the context in which the registry was created
           resourceRegistryCreatedIn :: !(Context m)
 
