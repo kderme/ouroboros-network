@@ -97,11 +97,12 @@ run
   -> IO ()
 run tracers chainDbTracer rna dbPath pInfo
     customiseChainDbArgs customiseNodeArgs onNodeKernel =
-    withRegistry $ \registry -> do
+    withRegistry $ \registry -> withUnsafeRegistry $ \registryVolDB -> do
 
       chainDB <- initChainDB
         chainDbTracer
         registry
+        registryVolDB
         dbPath
         cfg
         initLedger
@@ -147,6 +148,7 @@ initChainDB
   :: forall blk. RunNode blk
   => Tracer IO (ChainDB.TraceEvent blk)
   -> ResourceRegistry IO
+  -> ResourceRegistry IO
   -> FilePath
      -- ^ Database path
   -> NodeConfig (BlockProtocol blk)
@@ -156,7 +158,7 @@ initChainDB
   -> (ChainDbArgs IO blk -> ChainDbArgs IO blk)
       -- ^ Customise the 'ChainDbArgs'
   -> IO (ChainDB IO blk)
-initChainDB tracer registry dbPath cfg initLedger slotLength
+initChainDB tracer registry registryVolDB dbPath cfg initLedger slotLength
             customiseArgs = do
     epochInfo <- newEpochInfo $ nodeEpochSize (Proxy @blk) cfg
     ChainDB.openDB $ mkArgs epochInfo
@@ -186,6 +188,7 @@ initChainDB tracer registry dbPath cfg initLedger slotLength
       , ChainDB.cdbParamsLgrDB      = ledgerDbDefaultParams secParam
       , ChainDB.cdbNodeConfig       = cfg
       , ChainDB.cdbRegistry         = registry
+      , ChainDB.cdbRegistryVolDB    = registryVolDB
       , ChainDB.cdbTracer           = tracer
       , ChainDB.cdbValidation       = ValidateMostRecentEpoch
       , ChainDB.cdbGcDelay          = secondsToDiffTime 10

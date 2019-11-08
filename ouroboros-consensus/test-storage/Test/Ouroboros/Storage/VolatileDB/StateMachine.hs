@@ -55,11 +55,13 @@ import qualified Ouroboros.Network.Point as WithOrigin
 import           Ouroboros.Consensus.Util (SomePair (..))
 import qualified Ouroboros.Consensus.Util.Classify as C
 import           Ouroboros.Consensus.Util.IOLike
+import           Ouroboros.Consensus.Util.ResourceRegistry
 
 import           Ouroboros.Storage.FS.API
 import           Ouroboros.Storage.FS.API.Types
 import qualified Ouroboros.Storage.Util.ErrorHandling as EH
 import           Ouroboros.Storage.VolatileDB.API
+import           Ouroboros.Storage.VolatileDB.HandleResource (_handle)
 import qualified Ouroboros.Storage.VolatileDB.Impl as Internal hiding (openDB)
 import           Ouroboros.Storage.VolatileDB.Util
 
@@ -514,7 +516,7 @@ semanticsRestCmd hasFS env db cmd = case cmd of
     DuplicateBlock _file  bid preBid -> do
         let specialEnc = toBinary (bid, preBid)
         SomePair stHasFS st <- getInternalState env
-        let hndl = Internal._currentWriteHandle st
+        let hndl = _handle $ Internal._currentWriteHandle st
         _ <- hPut stHasFS hndl (BL.lazyByteString specialEnc)
         closeDB db
         reOpenDB db
@@ -555,10 +557,12 @@ prop_sequential =
                  -> HasFS IO h
                  -> PropertyM IO (History (At CmdErr) (At Resp), Reason)
             test errorsVar hasFS = do
-              (db, env) <- run $ Internal.openDBFull hasFS EH.monadCatch (EH.throwCantCatch EH.monadCatch) (myParser hasFS) 3
+              registry <- run $ newUnsafeRegistry
+              (db, env) <- run $ Internal.openDBFull hasFS EH.monadCatch (EH.throwCantCatch EH.monadCatch) (myParser hasFS) 3 registry
               let sm' = sm True errorsVar hasFS db env dbm
               (hist, _model, res) <- runCommands sm' cmds
               run $ closeDB db
+              run $ closeRegistry registry
               return (hist, res)
         errorsVar <- run $ uncheckedNewTVarM mempty
         fsVar <- run $ uncheckedNewTVarM Mock.empty
@@ -582,7 +586,7 @@ prop_sequential =
 
 tests :: TestTree
 tests = testGroup "VolatileDB-q-s-m" [
-      testProperty "q-s-m-Errors" $ prop_sequential
+      testProperty "q-s-m-Errors" prop_sequential
     ]
 
 {-------------------------------------------------------------------------------

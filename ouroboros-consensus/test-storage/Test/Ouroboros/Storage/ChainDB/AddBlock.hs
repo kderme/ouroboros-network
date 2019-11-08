@@ -111,8 +111,9 @@ prop_addBlock_multiple_threads bpt =
           <$> uncheckedNewTVarM Mock.empty
           <*> uncheckedNewTVarM Mock.empty
           <*> uncheckedNewTVarM Mock.empty
-        withRegistry $ \registry -> do
-          let args = mkArgs cfg initLedger dynamicTracer registry fsVars
+        withRegistry $ \registry -> withUnsafeRegistry $ \registryVolDB -> do
+          let args = mkArgs cfg initLedger dynamicTracer registry registryVolDB
+                            fsVars
           db <- openDB args
           -- Add blocks concurrently
           mapConcurrently_ (mapM_ (addBlock db)) $ blocksPerThread bpt
@@ -222,10 +223,11 @@ mkArgs :: IOLike m
        -> ExtLedgerState TestBlock
        -> Tracer m (ChainDB.TraceEvent TestBlock)
        -> ResourceRegistry m
+       -> ResourceRegistry m
        -> (StrictTVar m MockFS, StrictTVar m MockFS, StrictTVar m MockFS)
           -- ^ ImmutableDB, VolatileDB, LedgerDB
        -> ChainDbArgs m TestBlock
-mkArgs cfg initLedger tracer registry
+mkArgs cfg initLedger tracer registry registryVolDB
        (immDbFsVar, volDbFsVar, lgrDbFsVar) = ChainDbArgs
     { -- Decoders
       cdbDecodeHash       = decode
@@ -265,5 +267,6 @@ mkArgs cfg initLedger tracer registry
     , cdbTracer           = tracer
     , cdbTraceLedger      = nullTracer
     , cdbRegistry         = registry
+    , cdbRegistryVolDB    = registryVolDB
     , cdbGcDelay          = 0
     }

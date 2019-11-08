@@ -164,7 +164,7 @@ createFileImpl hasFS env = do
 
 getInternalState :: forall m blockId. IOLike m
                  => VolatileDBEnv m blockId
-                 -> m (SomePair (HasFS m) (InternalState blockId))
+                 -> m (SomePair (HasFS m) (InternalState blockId m))
 getInternalState VolatileDBEnv{..} = do
     mSt <- readMVar _dbInternalState
     case mSt of

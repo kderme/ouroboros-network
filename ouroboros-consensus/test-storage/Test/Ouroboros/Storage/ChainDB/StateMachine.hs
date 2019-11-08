@@ -1036,14 +1036,16 @@ prop_sequential = forAllCommands smUnused Nothing $ \cmds -> QC.monadicIO $ do
             , Property
             )
     test cmds = do
-      threadRegistry     <- QC.run unsafeNewRegistry
-      iteratorRegistry   <- QC.run unsafeNewRegistry
+      threadRegistry     <- QC.run $ unsafeNewRegistry
+      iteratorRegistry   <- QC.run $ unsafeNewRegistry
+      volDBRegistry      <- QC.run $ newUnsafeRegistry
       (tracer, getTrace) <- QC.run recordingTracerIORef
       fsVars             <- QC.run $ (,,)
         <$> uncheckedNewTVarM Mock.empty
         <*> uncheckedNewTVarM Mock.empty
         <*> uncheckedNewTVarM Mock.empty
-      let args = mkArgs testCfg testInitExtLedger tracer threadRegistry fsVars
+      let args = mkArgs testCfg testInitExtLedger tracer threadRegistry volDBRegistry
+                        fsVars
       (db, internal)     <- QC.run $ openDBInternal args False
       let sm' = sm db internal iteratorRegistry genBlk testCfg testInitExtLedger
       (hist, model, res) <- runCommands sm' cmds
@@ -1073,6 +1075,7 @@ prop_sequential = forAllCommands smUnused Nothing $ \cmds -> QC.monadicIO $ do
         -- first place: to clean up resources in case exceptions get thrown.
         remainingCleanups <- countResources iteratorRegistry
         closeRegistry iteratorRegistry
+        closeRegistry volDBRegistry
 
         -- Read the final MockFS of each database
         let (immDbFsVar, volDbFsVar, lgrDbFsVar) = fsVars
@@ -1164,10 +1167,11 @@ mkArgs :: IOLike m
        -> ExtLedgerState Blk
        -> Tracer m (TraceEvent Blk)
        -> ResourceRegistry m
+       -> ResourceRegistry m
        -> (StrictTVar m MockFS, StrictTVar m MockFS, StrictTVar m MockFS)
           -- ^ ImmutableDB, VolatileDB, LedgerDB
        -> ChainDbArgs m Blk
-mkArgs cfg initLedger tracer registry
+mkArgs cfg initLedger tracer registry registryVolDB
        (immDbFsVar, volDbFsVar, lgrDbFsVar) = ChainDbArgs
     { -- Decoders
       cdbDecodeHash       = decode
@@ -1209,6 +1213,7 @@ mkArgs cfg initLedger tracer registry
     , cdbTracer           = tracer
     , cdbTraceLedger      = nullTracer
     , cdbRegistry         = registry
+    , cdbRegistryVolDB    = registryVolDB
     , cdbGcDelay          = 0
     }
 
@@ -1223,7 +1228,7 @@ tests = testGroup "ChainDB q-s-m"
 
 -- | Debugging utility: run some commands against the real implementation.
 _runCmds :: [Cmd Blk IteratorId ReaderId] -> IO [Resp Blk IteratorId ReaderId]
-_runCmds cmds = withRegistry $ \registry -> do
+_runCmds cmds = withRegistry $ \registry -> withUnsafeRegistry $ \registryVolDB -> do
     fsVars <- (,,)
       <$> uncheckedNewTVarM Mock.empty
       <*> uncheckedNewTVarM Mock.empty
@@ -1233,6 +1238,7 @@ _runCmds cmds = withRegistry $ \registry -> do
           testInitExtLedger
           (showTracing stdoutTracer)
           registry
+          registryVolDB
           fsVars
     (db, internal) <- openDBInternal args False
     evalStateT (mapM (go db internal registry) cmds) emptyRunCmdState

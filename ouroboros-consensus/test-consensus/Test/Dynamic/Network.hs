@@ -157,12 +157,14 @@ runNodeNetwork registry testBtime numCoreNodes nodeJoinPlan nodeTopology
         error $ "unsatisfiable nodeJoinPlan: " ++ show coreNodeId
 
       -- allocate the node's internal state and spawn its internal threads
-      (node, readNodeInfo, app) <- createNode varRNG coreNodeId
+      (node, readNodeInfo, app, handlesRegistry) <- createNode varRNG coreNodeId
 
       -- unblock the threads of edges that involve this node
       putMVar nodeVar app
 
-      return (coreNodeId, pInfoConfig (pInfo coreNodeId), node, readNodeInfo)
+      return ( (coreNodeId, pInfoConfig (pInfo coreNodeId), node, readNodeInfo)
+             , handlesRegistry
+             )
 
     -- Wait some extra time after the end of the test block fetch and chain
     -- sync to finish
@@ -175,7 +177,11 @@ runNodeNetwork registry testBtime numCoreNodes nodeJoinPlan nodeTopology
     -- still running at that point, they will throw a 'CloseDBError'.
     closeRegistry registry
 
-    getTestOutput nodes
+    output <- getTestOutput $ fst <$> nodes
+    -- 'getTestOutput' still accesses the dbs, so this is the correct place to
+    -- close the registry of the handles.
+    forM_ (snd <$> nodes) closeRegistry
+    return output
   where
     btime = testBlockchainTime testBtime
 
@@ -232,11 +238,12 @@ runNodeNetwork registry testBtime numCoreNodes nodeJoinPlan nodeTopology
            -> Tracer m (Point blk, BlockNo)
               -- ^ added block tracer
            -> NodeDBs (StrictTVar m MockFS)
+           -> ResourceRegistry m
            -> ChainDbArgs m blk
     mkArgs
       cfg initLedger epochInfo
       invalidTracer addTracer
-      nodeDBs = ChainDbArgs
+      nodeDBs handlesRegistry = ChainDbArgs
         { -- Decoders
           cdbDecodeHash       = nodeDecodeHeaderHash (Proxy @blk)
         , cdbDecodeBlock      = nodeDecodeBlock cfg
@@ -279,6 +286,7 @@ runNodeNetwork registry testBtime numCoreNodes nodeJoinPlan nodeTopology
               _   -> pure ()
         , cdbTraceLedger      = nullTracer
         , cdbRegistry         = registry
+        , cdbRegistryVolDB    = handlesRegistry
         , cdbGcDelay          = 0
         }
 
@@ -289,6 +297,7 @@ runNodeNetwork registry testBtime numCoreNodes nodeJoinPlan nodeTopology
       -> m ( NodeKernel m NodeId blk
            , m (NodeInfo blk MockFS [])
            , LimitedApp m NodeId blk
+           , ResourceRegistry m
            )
     createNode varRNG coreNodeId = do
       let ProtocolInfo{..} = pInfo coreNodeId
@@ -319,6 +328,7 @@ runNodeNetwork registry testBtime numCoreNodes nodeJoinPlan nodeTopology
             } = nodeInfo
 
       epochInfo <- newEpochInfo $ nodeEpochSize (Proxy @blk) pInfoConfig
+      handlesRegistry <- newUnsafeRegistry
       chainDB <- ChainDB.openDB $ mkArgs
           pInfoConfig pInfoInitLedger epochInfo
           (nodeEventsInvalids nodeInfoEvents)
@@ -326,6 +336,7 @@ runNodeNetwork registry testBtime numCoreNodes nodeJoinPlan nodeTopology
               s <- atomically $ getCurrentSlot btime
               traceWith (nodeEventsAdds nodeInfoEvents) (s, p, bno))
           nodeInfoDBs
+          handlesRegistry
 
       let nodeArgs = NodeArgs
             { tracers             = nullDebugTracers
@@ -366,7 +377,7 @@ runNodeNetwork registry testBtime numCoreNodes nodeJoinPlan nodeTopology
         (ChainDB.getCurrentLedger chainDB)
         (getMempool nodeKernel)
 
-      return (nodeKernel, readNodeInfo, LimitedApp app)
+      return (nodeKernel, readNodeInfo, LimitedApp app, handlesRegistry)
 
 {-------------------------------------------------------------------------------
   Running the Mini Protocols on an Ordered Pair of Nodes

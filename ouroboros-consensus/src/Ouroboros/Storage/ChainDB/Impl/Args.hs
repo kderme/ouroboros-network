@@ -81,6 +81,7 @@ data ChainDbArgs m blk = forall h1 h2 h3. ChainDbArgs {
     , cdbTracer           :: Tracer m (TraceEvent blk)
     , cdbTraceLedger      :: Tracer m (LgrDB.LedgerDB blk)
     , cdbRegistry         :: ResourceRegistry m
+    , cdbRegistryVolDB    :: ResourceRegistry m
     , cdbGcDelay          :: DiffTime
     }
 
@@ -147,6 +148,7 @@ fromChainDbArgs ChainDbArgs{..} = (
           volHasFS            = cdbHasFSVolDb
         , volErr              = cdbErrVolDb
         , volErrSTM           = cdbErrVolDbSTM
+        , volRegistry         = cdbRegistryVolDB
         , volBlocksPerFile    = cdbBlocksPerFile
         , volEncodeBlock      = cdbEncodeBlock
         , volDecodeBlock      = cdbDecodeBlock
@@ -218,5 +220,6 @@ toChainDbArgs ImmDB.ImmDbArgs{..}
     , cdbTracer           = cdbsTracer
     , cdbTraceLedger      = lgrTraceLedger
     , cdbRegistry         = cdbsRegistry
+    , cdbRegistryVolDB    = volRegistry
     , cdbGcDelay          = cdbsGcDelay
     }

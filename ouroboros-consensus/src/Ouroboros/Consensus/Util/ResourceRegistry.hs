@@ -493,35 +493,33 @@ instance Exception RegistryClosedException
 -- You are strongly encouraged to use 'withRegistry' instead.
 -- Exported primarily for the benefit of tests.
 unsafeNewRegistry :: (IOLike m, HasCallStack) => m (ResourceRegistry m)
-unsafeNewRegistry = do
-    context  <- captureContext
-    stateVar <- newTVarM initState
-    return ResourceRegistry {
-          registryContext     = context
-        , registryCheckThread = True
-        , registryState       = stateVar
-        }
-
-initState :: RegistryState m
-initState = RegistryState {
-      registryThreads   = KnownThreads Set.empty
-    , registryResources = Map.empty
-    , registryNextKey   = ResourceId 1
-    , registryStatus    = RegistryOpen
-    }
+unsafeNewRegistry = newRegistry True
 
 -- | Like 'unsafeNewRegistry', but creates an unsafe registry, in the sense
 -- that any thread can use it. 'forkThread' can't be called for an unsafe
 -- registry.
 newUnsafeRegistry :: (IOLike m, HasCallStack) => m (ResourceRegistry m)
-newUnsafeRegistry = do
+newUnsafeRegistry = newRegistry False
+
+-- | Internal constructor. 'unsafeNewRegistry' and  'newUnsafeRegistry'
+-- are enough to create any kind of 'ResourceRegistry'.
+newRegistry :: (IOLike m, HasCallStack) => Bool -> m (ResourceRegistry m)
+newRegistry checkThread = do
     context  <- captureContext
     stateVar <- newTVarM initState
     return ResourceRegistry {
         registryContext     = context
-      , registryCheckThread = False
+      , registryCheckThread = checkThread
       , registryState       = stateVar
       }
+  where
+    initState :: RegistryState m
+    initState = RegistryState {
+          registryThreads   = KnownThreads Set.empty
+        , registryResources = Map.empty
+        , registryNextKey   = ResourceId 1
+        , registryStatus    = RegistryOpen
+        }
 
 -- | Close the registry
 --

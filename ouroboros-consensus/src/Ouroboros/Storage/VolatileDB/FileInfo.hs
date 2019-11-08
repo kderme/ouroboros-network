@@ -36,21 +36,20 @@ import           Ouroboros.Network.Block (MaxSlotNo (..), SlotNo,
 import           Ouroboros.Consensus.Util
 
 import           Ouroboros.Storage.Common
-import           Ouroboros.Storage.FS.API.Types
+import           Ouroboros.Storage.VolatileDB.HandleResource
 import           Ouroboros.Storage.VolatileDB.Types
 import           Ouroboros.Storage.VolatileDB.Util
-
 
 {-------------------------------------------------------------------------------
   Types
 -------------------------------------------------------------------------------}
 
 -- | The Internal information the db keeps for each file.
-data FileInfo blockId h = MkFileInfo {
+data FileInfo blockId h m = MkFileInfo {
       fLatestSlot :: !MaxSlotNo
     , fNBlocks    :: !Int
     , fContents   :: !(Map SlotOffset (FileSlotInfo blockId))
-    , fReadHandle :: !(Handle h)
+    , fReadHandle :: !(HandleResource h m)
     } deriving (Show, Generic, NoUnexpectedThunks)
 
 -- | Information about a slot in a file
@@ -63,7 +62,7 @@ data FileSlotInfo blockId = FileSlotInfo {
   Construction
 -------------------------------------------------------------------------------}
 
-empty :: Handle h -> FileInfo blockId h
+empty :: HandleResource h m -> FileInfo blockId h m
 empty hndl = MkFileInfo {
       fLatestSlot = NoMaxSlotNo
     , fNBlocks    = 0
@@ -75,8 +74,8 @@ empty hndl = MkFileInfo {
 addSlot :: SlotNo
         -> SlotOffset
         -> FileSlotInfo blockId
-        -> FileInfo blockId h
-        -> FileInfo blockId h
+        -> FileInfo blockId h m
+        -> FileInfo blockId h m
 addSlot slotNo slotOffset slotInfo fileInfo@MkFileInfo{..} = fileInfo {
       fLatestSlot = updateSlotNoBlockId fLatestSlot [slotNo]
     , fNBlocks    = fNBlocks + 1
@@ -88,8 +87,8 @@ addSlot slotNo slotOffset slotInfo fileInfo@MkFileInfo{..} = fileInfo {
 -- Additionally, it returns information about the last 'SlotOffset' in the
 -- file, unless the file is empty.
 fromParsedInfo :: ParsedInfo blockId
-               -> Handle h
-               -> (FileInfo blockId h, Maybe (blockId, SlotNo))
+               -> HandleResource h m
+               -> (FileInfo blockId h m, Maybe (blockId, SlotNo))
 fromParsedInfo parsed hndl =
     case lastSlotInfo parsed' of
       Nothing     -> (MkFileInfo NoMaxSlotNo   nBlocks contents hndl, Nothing)
@@ -108,7 +107,7 @@ mkFileSlotInfo = FileSlotInfo
 
 -- | Checks if this file can be GCed in terms of its max slot.
 -- This doesn't check for any open read handles.
-canGC :: FileInfo blockId h
+canGC :: FileInfo blockId h m
       -> SlotNo -- ^ The slot number of any block in the immutable DB.
       -> Bool
 canGC MkFileInfo{..} slot =
@@ -117,22 +116,22 @@ canGC MkFileInfo{..} slot =
       MaxSlotNo latest -> latest < slot
 
 -- | All @blockId@ in this file.
-blockIds :: FileInfo blockId h -> [blockId]
+blockIds :: FileInfo blockId h m -> [blockId]
 blockIds MkFileInfo{..} = fsBlockId <$> Map.elems fContents
 
 -- | Has this file reached its maximum size?
-isFull :: Int -> FileInfo blockId h -> Bool
+isFull :: Int -> FileInfo blockId h m -> Bool
 isFull maxNumBlocks MkFileInfo{..} = fNBlocks >= fromIntegral maxNumBlocks
 
-maxSlot :: FileInfo blockId h -> MaxSlotNo
+maxSlot :: FileInfo blockId h m -> MaxSlotNo
 maxSlot = fLatestSlot
 
-maxSlotInFiles :: [FileInfo blockId h] -> MaxSlotNo
+maxSlotInFiles :: [FileInfo blockId h m] -> MaxSlotNo
 maxSlotInFiles = maxSlotNoFromMaybe
                . safeMaximum
                . mapMaybe (maxSlotNoToMaybe . maxSlot)
 
-getHandle :: FileInfo blockId h -> Handle h
+getHandle :: FileInfo blockId h m -> HandleResource h m
 getHandle = fReadHandle
 
 {-------------------------------------------------------------------------------

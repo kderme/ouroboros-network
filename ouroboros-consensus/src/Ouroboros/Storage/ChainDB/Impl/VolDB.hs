@@ -73,6 +73,7 @@ import           Ouroboros.Consensus.Block (GetHeader, Header)
 import qualified Ouroboros.Consensus.Block as Block
 import qualified Ouroboros.Consensus.Util.CBOR as Util.CBOR
 import           Ouroboros.Consensus.Util.IOLike
+import           Ouroboros.Consensus.Util.ResourceRegistry
 
 import           Ouroboros.Storage.ChainDB.API (ChainDbError (..),
                      ChainDbFailure (..), StreamFrom (..), StreamTo (..))
@@ -118,6 +119,7 @@ data VolDbArgs m blk = forall h. VolDbArgs {
       volHasFS         :: HasFS m h
     , volErr           :: ErrorHandling (VolatileDBError (HeaderHash blk)) m
     , volErrSTM        :: ThrowCantCatch (VolatileDBError (HeaderHash blk)) (STM m)
+    , volRegistry      :: ResourceRegistry m
     , volBlocksPerFile :: Int
     , volDecodeBlock   :: forall s. Decoder s (Lazy.ByteString -> blk)
     , volEncodeBlock   :: blk -> Encoding
@@ -127,6 +129,7 @@ data VolDbArgs m blk = forall h. VolDbArgs {
 --
 -- The following fields must still be defined:
 --
+-- * 'volRegistry'
 -- * 'volBlocksPerFile'
 -- * 'volDecodeBlock'
 -- * 'volEncodeBlock'
@@ -136,6 +139,7 @@ defaultArgs fp = VolDbArgs {
     , volErrSTM = EH.throwSTM
     , volHasFS  = ioHasFS $ MountPoint (fp </> "volatile")
       -- Fields without a default
+    , volRegistry      = error "no default for volRegistry"
     , volBlocksPerFile = error "no default for volBlocksPerFile"
     , volDecodeBlock   = error "no default for volDecodeBlock"
     , volEncodeBlock   = error "no default for volEncodeBlock"
@@ -150,6 +154,7 @@ openDB args@VolDbArgs{..} = do
                volErrSTM
                (blockFileParser args)
                volBlocksPerFile
+               volRegistry
     return VolDB
       { volDB    = volDB
       , err      = volErr
