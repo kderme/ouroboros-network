@@ -299,7 +299,7 @@ sm db env genOption dbm = StateMachine {
     , semantics     = semanticsImpl (getErrorsVar genOption) db env
     , mock          = mockImpl
     , invariant     = Nothing
-    , cleanup       = noCleanup
+    , cleanup       = \_ -> closeDB db
     }
 
 smUnusedSeq :: IOLike m
@@ -492,10 +492,11 @@ generatorCmdImplParallel m@Model {..} =
       , (100, return $ GetBlockIds)
       , (150, return $ PutBlock block $ WithOrigin.At pblock)
       , (100, return $ GetSuccessors $ WithOrigin.At block : (WithOrigin.At <$> possiblePredecessors))
-      , (100, return $ GetPredecessor blocks)
+--      , (100, return $ GetPredecessor blocks)
       , (100, return $ GetMaxSlotNo)
       , (50, return $ GarbageCollect block)
       , (50, return $ IsOpen)
+      , (50, return $ Close)
       , (if open dbModel then 10 else 1000, return $ ReOpen)
       ]
 
@@ -615,7 +616,7 @@ prop_sequential =
                  -> HasFS IO h
                  -> PropertyM IO (History (At CmdErr) (At Resp), Reason)
             test errorsVar hasFS = do
-              registry <- run $ newUnsafeRegistry
+              registry <- run newUnsafeRegistry
               (db, env) <- run $ Internal.openDBFull hasFS EH.monadCatch
                 (EH.throwCantCatch EH.monadCatch) (myParser hasFS) 3 registry
               let sm' = sm db env (stdSequentialGenOption errorsVar) dbm
@@ -651,7 +652,7 @@ prop_parallel = forAllParallelCommands smUnused Nothing $
     liftIO $ do
         Dir.removePathForcibly path
         Dir.createDirectory path
-    registry <- run $ newUnsafeRegistry
+    registry <- run newUnsafeRegistry
     let hasFS = ioHasFS $ MountPoint path
     (db, env) <- run $ Internal.openDBFull hasFS EH.monadCatch
                     (EH.throwCantCatch EH.monadCatch) (myParser hasFS) 3 registry
@@ -671,7 +672,7 @@ prop_parallel = forAllParallelCommands smUnused Nothing $
 tests :: TestTree
 tests = testGroup "VolatileDB-q-s-m" [
       testProperty "sequential" prop_sequential
-    , testProperty "parallel" prop_parallel
+    , testProperty "parallel" $ withMaxSuccess 3000 prop_parallel
     ]
 
 {-------------------------------------------------------------------------------

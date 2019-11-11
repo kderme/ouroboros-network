@@ -40,3 +40,11 @@ prop_VolatileInvalidArg = monadicIO $ do
             _ <- Internal.openDBFull hasFS err (EH.throwCantCatch EH.monadCatch) (myParser hasFS) 0 registry
             return ()
         )
+
+prop_VolatileReOpen :: HasCallStack => Property
+prop_VolatileReOpen = monadicIO $ do
+    run $ apiEquivalenceVolDB (expectVolDBResult (@?= ()))  (\hasFS err -> withRegistry $ \registry -> do
+            _ <- Internal.openDBFull hasFS err (EH.throwCantCatch EH.monadCatch) (myParser hasFS) 0 registry
+--            putBlock 
+            return ()
+        )
