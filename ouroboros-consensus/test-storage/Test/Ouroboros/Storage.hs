@@ -17,9 +17,9 @@ import           Test.Tasty (TestTree, testGroup)
 
 tests :: HasCallStack => FilePath -> TestTree
 tests tmpDir = testGroup "Storage"
-    [ FS.tests tmpDir
-    , ImmutableDB.tests
-    , VolatileDB.tests
-    , LedgerDB.tests
-    , ChainDB.tests
+    [ -- FS.tests tmpDir
+     ImmutableDB.tests
+--    , VolatileDB.tests
+--    , LedgerDB.tests
+--    , ChainDB.tests
     ]
