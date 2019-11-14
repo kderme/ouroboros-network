@@ -522,7 +522,7 @@ generateCmd Model {..} = At <$> frequency
     chooseEpoch = chooseWord64
 
     genSlotInThePast :: Gen SlotNo
-    genSlotInThePast = chooseSlot (0, lastSlot)
+    genSlotInThePast = chooseSlot (0, lastSlot - 1)
 
     genSlotInTheFuture :: Gen SlotNo
     genSlotInTheFuture = chooseSlot (succ lastSlot, maxBound)

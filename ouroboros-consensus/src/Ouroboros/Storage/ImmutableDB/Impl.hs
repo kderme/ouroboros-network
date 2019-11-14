@@ -590,12 +590,12 @@ getEpochSlot _dbHasFS hashDecoder OpenState {..} _dbErr epochSlot = do
             !end   = decodeIndexEntryAt indexEntrySizeBytes bytes
 
         mbEBBHash <- if relativeSlot == 0 && end > start
-          then error "123" -- do
+          then do -- error "123" -- do
 --            -- TODO: This case seems to never appear in tests.
 --            -- Seek till after the offsets so we can read the hash
---            epochSize <- epochInfoSize _epochInfo epoch
---            let hashOffset = (fromIntegral epochSize + 2) * indexEntrySizeBytes
---            deserialiseHash' =<< hGetAllAt _dbHasFS iHnd (fromIntegral hashOffset)
+            epochSize <- epochInfoSize _epochInfo epoch
+            let hashOffset = (fromIntegral epochSize + 2) * indexEntrySizeBytes
+            deserialiseHash' =<< hGetAllAt _dbHasFS iHnd (fromIntegral hashOffset)
           else return NoCurrentEBB -- error $ show end ++ "-" ++ show start -- 
 
         return (start, end - start, mbEBBHash)
