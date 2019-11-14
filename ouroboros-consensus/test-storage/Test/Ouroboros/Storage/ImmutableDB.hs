@@ -61,6 +61,7 @@ tests = testGroup "ImmutableDB"
     [ testCase     "AppendToSlotInThePastError equivalence" test_AppendToSlotInThePastErrorEquivalence
     , testCase     "ReadFutureSlotError equivalence" test_ReadFutureSlotErrorEquivalence
     , testCase     "Starting a new epoch pads the previous epoch's index" test_startNewEpochPadsTheIndexFile
+    , testCase     "non empty ebb" test_getNonemptyOldEBB
     , testCase     "openDB with an empty index file" test_openDBEmptyIndexFileEquivalence
     , testCase     "closeDB is idempotent" test_closeDBIdempotentEquivalence
     , testCase     "appendBinaryBlob after closeDB throws a ClosedDBError" test_closeDBAppendBinaryBlobEquivalence
@@ -201,6 +202,27 @@ test_startNewEpochPadsTheIndexFile = withMockFS try assrt $ \hasFS err ->
       getIndexContents fs (mkFsPath ["index-000.dat"]) @?= [0, 0, 1, 6, 6, 6, 13, 13, 13, 13, 13, 13]
       getIndexContents fs (mkFsPath ["index-001.dat"]) @?= [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
       getIndexContents fs (mkFsPath ["index-002.dat"]) @?= []
+
+test_getNonemptyOldEBB :: Assertion
+test_getNonemptyOldEBB = withMockFS try assrt $ \hasFS err ->
+    withTestDB hasFS err $ \db -> do
+      appendEBB db (EpochNo 0) (TestHeaderHash 1) "a"
+      appendBinaryBlob db 10 "a"
+      getEBB db (EpochNo 0)
+--      appendBinaryBlob db 9 "bravo"
+--      appendBinaryBlob db 4 "haskell"
+--      -- Skip epoch 1, now in epoch 2
+--      appendBinaryBlob db 21 "c"
+  where
+    try = tryImmDB EH.exceptions EH.exceptions
+
+    assrt (Left _)        = assertFailure "Unexpected error"
+    assrt (Right (a, fs)) = do
+      getIndexContents fs (mkFsPath ["index-000.dat"]) @?= [0,1,1,1,1,1,1,1,1,1,1,1]
+      getIndexContents fs (mkFsPath ["index-001.dat"]) @?= []
+      a @?= Just (TestHeaderHash 1, "a")
+--      getIndexContents fs (mkFsPath ["index-001.dat"]) @?= [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+--      getIndexContents fs (mkFsPath ["index-002.dat"]) @?= []
 
 {------------------------------------------------------------------------------
   Index

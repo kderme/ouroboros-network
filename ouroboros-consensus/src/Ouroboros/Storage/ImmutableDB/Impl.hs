@@ -573,7 +573,7 @@ getEpochSlot _dbHasFS hashDecoder OpenState {..} _dbErr epochSlot = do
             -- precondition.
             toDrop = fromEnum (lastRelativeSlot - relativeSlot)
 
-      -- Otherwise, the offsets will have to be read from an index file
+      -- otherwise, the offsets will have to be read from an index file
       False -> withFile _dbHasFS indexFile ReadMode $ \iHnd -> do
         -- Grab the offset in bytes of the requested slot.
         let indexSeekPosition =
@@ -596,7 +596,7 @@ getEpochSlot _dbHasFS hashDecoder OpenState {..} _dbErr epochSlot = do
 --            epochSize <- epochInfoSize _epochInfo epoch
 --            let hashOffset = (fromIntegral epochSize + 2) * indexEntrySizeBytes
 --            deserialiseHash' =<< hGetAllAt _dbHasFS iHnd (fromIntegral hashOffset)
-          else error "567" -- return NoCurrentEBB
+          else return NoCurrentEBB -- error $ show end ++ "-" ++ show start -- 
 
         return (start, end - start, mbEBBHash)
 

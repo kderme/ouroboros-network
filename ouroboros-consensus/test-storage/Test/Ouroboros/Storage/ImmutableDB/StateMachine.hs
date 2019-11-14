@@ -1131,7 +1131,7 @@ prop_sequential = forAllCommands smUnused Nothing $ \cmds -> QC.monadicIO $ do
 
 tests :: TestTree
 tests = testGroup "ImmutableDB q-s-m"
-    [ testProperty "sequential" prop_sequential
+    [ testProperty "sequential" $ withMaxSuccess 5000 prop_sequential
     ]
 
 fixedEpochSize :: EpochSize
