@@ -110,6 +110,8 @@ run tracers chainDbTracer rna dbPath pInfo
       (nodeProtocolMagicId (Proxy @blk) cfg)
     withRegistry $ \registry -> do
 
+      lockDbMarkerFile registry dbPath
+
       chainDB <- initChainDB
         chainDbTracer
         registry
