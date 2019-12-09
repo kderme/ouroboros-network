@@ -2,15 +2,16 @@
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections       #-}
 
 module Ouroboros.Storage.VolatileDB.Util
     ( -- * FileId utilities
       parseFd
     , unsafeParseFd
     , parseAllFds
-    , filePath
+    , blockFile
+    , metaFile
     , findLastFd
+    , keepFileId
 
       -- * Exception handling
     , fromEither
@@ -30,6 +31,8 @@ module Ouroboros.Storage.VolatileDB.Util
     ) where
 
 import           Control.Monad
+import           Data.Either (partitionEithers)
+import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Set (Set)
 import qualified Data.Set as Set
@@ -54,36 +57,98 @@ import           Ouroboros.Storage.VolatileDB.Types
   FileId utilities
 ------------------------------------------------------------------------------}
 
-parseFd :: FsPath -> Either VolatileDBError FileId
+data FileType = Blocks | MetaData
+    deriving (Show, Eq)
+
+parseFd :: FsPath -> Either VolatileDBError (FileId, FileType)
 parseFd file = maybe err Right $
     parseFilename <=< lastMaybe $ fsPathToList file
   where
     err = Left $ UnexpectedError $ ParserError $ InvalidFilename file
 
-    parseFilename :: Text -> Maybe FileId
-    parseFilename = readMaybe
-                  . T.unpack
-                  . snd
-                  . T.breakOnEnd "-"
-                  . fst
-                  . T.breakOn "."
+    parseFilename :: Text -> Maybe (FileId, FileType)
+    parseFilename txt = do
+        fileId <- readMaybe $ T.unpack fileIdStr
+        fileType <- case fileTypeStr of
+          "blocks"   -> Just Blocks
+          "metadata" -> Just MetaData
+          _          -> Nothing
+        return (fileId, fileType)
+      where
+        (fileTypeStr, fileIdStr) = T.breakOnEnd "-" $ fst $ T.breakOn "." txt
+
+data FileEntryState = EntryBlock FsPath
+                    | EntryMeta FsPath
+                    | EntryComplete (FsPath, FsPath)
+                    | EntryError [FsPath]
+
+type FileEntries = Map FileId FileEntryState
+
+updateState :: (FsPath, FileType)
+            -> Maybe FileEntryState
+            -> FileEntryState
+updateState (path, Blocks) Nothing = EntryBlock path
+updateState (path, MetaData) Nothing = EntryMeta path
+updateState (path, Blocks) (Just (EntryMeta metafile))
+    = EntryComplete (path, metafile)
+updateState (path, MetaData) (Just (EntryBlock blockfile))
+    = EntryComplete (blockfile, path)
+updateState (path, _) (Just (EntryError paths)) = EntryError $ path : paths
+updateState (path, _) _ = EntryError [path]
 
 -- | Parses the 'FileId' of each 'FsPath' and zips them together.
 -- When parsing fails, we abort with the corresponding parse error.
-parseAllFds :: [FsPath] -> Either VolatileDBError [(FileId, FsPath)]
-parseAllFds = mapM $ \f -> (,f) <$> parseFd f
+parseAllFds :: [FsPath] -> Either VolatileDBError [(FileId, FsPath, FsPath)]
+parseAllFds files = do
+    groups <- groupEntries Map.empty files
+    validateGroups groups
+  where
+    groupEntries :: FileEntries
+                 -> [FsPath]
+                 -> Either VolatileDBError FileEntries
+    groupEntries entries [] = Right entries
+    groupEntries entries (fsPath : rest) = do
+      -- If a file does not parse, we immediately stop and do not try to recover.
+      (fileId, fileType) <- parseFd fsPath
+      -- If we catch an error for a specific fileId, we don't stop, because we want
+      -- to catch them all and clean them.
+      let newEntries = Map.alter (Just . updateState (fsPath, fileType)) fileId entries
+      groupEntries newEntries rest
+
+    validateGroups :: FileEntries
+                   -> Either VolatileDBError [(FileId, FsPath, FsPath)]
+    validateGroups entries =
+        case partitionEithers $ map validate $ Map.toList entries of
+          ([], completed) -> Right completed
+          (withError, _)  ->
+            Left $ UnexpectedError $ ParserError $ InvalidFileGroups withError
+
+    validate :: (FileId, FileEntryState)
+             -> Either [FsPath] (FileId, FsPath, FsPath)
+    validate (fileId, entryState) = case entryState of
+      EntryComplete (blocksFile, metasFile) ->
+          Right (fileId, blocksFile, metasFile)
+      EntryBlock path  -> Left [path]
+      EntryMeta path   -> Left [path]
+      EntryError paths -> Left paths
+
+keepFileId :: (a, b, c) -> a
+keepFileId (a, _, _) = a
 
 -- | When parsing fails, we abort with the corresponding parse error.
 findLastFd :: Set FsPath -> Either VolatileDBError (Maybe FileId)
-findLastFd = fmap safeMaximum . mapM parseFd . Set.toList
+findLastFd = fmap safeMaximum .  mapM (fmap fst . parseFd) . Set.toList
 
-filePath :: FileId -> FsPath
-filePath fd = mkFsPath ["blocks-" ++ show fd ++ ".dat"]
+blockFile :: FileId -> FsPath
+blockFile fd = mkFsPath ["blocks-" ++ show fd ++ ".dat"]
+
+metaFile :: FileId -> FsPath
+metaFile fd = mkFsPath ["metadata-" ++ show fd ++ ".dat"]
 
 unsafeParseFd :: FsPath -> FileId
 unsafeParseFd file = either
     (\_ -> error $ "Could not parse filename " <> show file)
-    id
+    fst
     (parseFd file)
 
 {------------------------------------------------------------------------------

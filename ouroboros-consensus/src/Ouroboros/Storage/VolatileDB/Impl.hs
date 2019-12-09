@@ -116,6 +116,7 @@ import           Ouroboros.Consensus.Util.IOLike
 
 import           Ouroboros.Storage.FS.API
 import           Ouroboros.Storage.FS.API.Types
+import           Ouroboros.Storage.ImmutableDB.Types (BinaryInfo(..))
 import           Ouroboros.Storage.Util.ErrorHandling (ErrorHandling (..),
                      ThrowCantCatch (..))
 import qualified Ouroboros.Storage.Util.ErrorHandling as EH
@@ -151,8 +152,8 @@ volatileDbIsOpen VolatileDbClosed   = False
 data InternalState blockId h = InternalState {
       _currentWriteHandle :: !(Handle h)
       -- ^ The only open file we append blocks to.
-    , _currentWritePath   :: !FsPath
-      -- ^ The path of the file above.
+    , _currentMetaHandle  :: !(Handle h)
+      -- ^ The file we append block metadata.
     , _currentWriteId     :: !FileId
       -- ^ The 'FileId' of the same file.
     , _currentWriteOffset :: !Word64
@@ -216,6 +217,7 @@ openDBFull hasFS err errSTM parser maxBlocksPerFile = do
       , getSuccessors  = getSuccessorsImpl env
       , getPredecessor = getPredecessorImpl env
       , getMaxSlotNo   = getMaxSlotNoImpl env
+      , getHeader      = getHeaderImpl env
       }
 
 openDBImpl :: ( HasCallStack
@@ -309,16 +311,17 @@ getBlockImpl env@VolatileDBEnv{..} slot =
 putBlockImpl :: forall m blockId. (IOLike m, Ord blockId)
              => VolatileDBEnv m blockId
              -> BlockInfo blockId
-             -> BS.Builder
+             -> BinaryInfo BS.Builder
              -> m ()
-putBlockImpl env@VolatileDBEnv{..} BlockInfo{..} builder =
+putBlockImpl env@VolatileDBEnv{..} BlockInfo{..} BinaryInfo{..} =
     modifyState env $ \hasFS@HasFS{..} st@InternalState{..} ->
       if Map.member bbid _currentRevMap
       then return (st, ()) -- putting an existing block is a no-op.
       else do
-        bytesWritten <- hPut hasFS _currentWriteHandle builder
+        bytesWritten <- hPut hasFS _currentWriteHandle binaryBlob
         updateStateAfterWrite hasFS st bytesWritten
   where
+
     updateStateAfterWrite :: forall h.
                              HasFS m h
                           -> InternalState blockId h
@@ -337,11 +340,13 @@ putBlockImpl env@VolatileDBEnv{..} BlockInfo{..} builder =
             (FileInfo.mkFileSlotInfo (BlockSize bytesWritten) bbid) fileInfo
         currentMap' = Index.insert _currentWriteId fileInfo' _currentMap
         internalBlockInfo' = InternalBlockInfo {
-            ibFile       = _currentWritePath
-          , ibSlotOffset = _currentWriteOffset
-          , ibBlockSize  = BlockSize bytesWritten
-          , ibSlot       = bslot
-          , ibPreBid     = bpreBid
+            ibFile         = blockFile _currentWriteId
+          , ibSlotOffset   = _currentWriteOffset
+          , ibBlockSize    = BlockSize bytesWritten
+          , ibSlot         = bslot
+          , ibPreBid       = bpreBid
+          , ibHeaderOffset = headerOffset
+          , ibHeaderSize   = headerSize
           }
         currentRevMap' = Map.insert bbid internalBlockInfo' _currentRevMap
         st' = st {
@@ -391,7 +396,8 @@ tryCollectFile :: forall m h blockId
 tryCollectFile hasFS@HasFS{..} env slot st@InternalState{..} (fileId, fileInfo) =
     if  | not canGC     -> return st
         | not isCurrent -> do
-            removeFile $ filePath fileId
+            removeFile $ blockFile fileId
+            removeFile $ metaFile fileId
             return st {
                 _currentMap     = Index.delete fileId _currentMap
               , _currentRevMap  = currentRevMap'
@@ -451,6 +457,13 @@ getMaxSlotNoImpl :: forall m blockId. IOLike m
                  -> STM m MaxSlotNo
 getMaxSlotNoImpl = getterSTM _currentMaxSlotNo
 
+getHeaderImpl :: forall m blockId. IOLike m
+              => VolatileDBEnv m blockId
+              -> blockId
+              -> m (Maybe ByteString)
+getHeaderImpl env@VolatileDBEnv{..} blockId = do
+  error ""
+
 {------------------------------------------------------------------------------
   Internal functions
 ------------------------------------------------------------------------------}
@@ -465,18 +478,15 @@ nextFile :: forall h m blockId. IOLike m
          -> m (InternalState blockId h)
 nextFile HasFS{..} _err VolatileDBEnv{..} st@InternalState{..} = do
     hClose _currentWriteHandle
-    hndl <- hOpen file (AppendMode MustBeNew)
+    hndl <- hOpen (blockFile _nextNewFileId) (AppendMode MustBeNew)
     return st {
         _currentWriteHandle = hndl
-      , _currentWritePath   = file
       , _currentWriteId     = _nextNewFileId
       , _currentWriteOffset = 0
       , _currentMap         = Index.insert _nextNewFileId FileInfo.empty
                                 _currentMap
       , _nextNewFileId      = _nextNewFileId + 1
       }
-  where
-    file = filePath _nextNewFileId
 
 -- | Truncates a file to 0 and update its state accordingly.
 -- This may throw an FsError.
@@ -513,8 +523,8 @@ mkInternalStateDB hasFS@HasFS{..} err parser maxBlocksPerFile =
     wrapFsError hasFsErr err $ do
       createDirectoryIfMissing True dbDir
       allFiles <- map toFsPath . Set.toList <$> listDirectory dbDir
-      filesWithIds <- fromEither err $ parseAllFds allFiles
-      mkInternalState hasFS err parser maxBlocksPerFile filesWithIds
+      validFileIds <- fromEither err $ fmap keepFileId <$> parseAllFds allFiles
+      mkInternalState hasFS err parser maxBlocksPerFile validFileIds
   where
     dbDir = mkFsPath []
 
@@ -536,17 +546,16 @@ mkInternalState
   -> ErrorHandling VolatileDBError m
   -> Parser e m blockId
   -> Int
-  -> [(FileId, FsPath)]
+  -> [FileId]
   -> m (InternalState blockId h)
 mkInternalState hasFS err parser n files =
     wrapFsError (hasFsErr hasFS) err $
       go Index.empty Map.empty Map.empty Nothing [] files
   where
     -- | This is the file with the maximum 'FileId' in the db.
-    lastFile = safeMaximumOn fst files
+    lastFile = safeMaximumOn id files
     newFileInfo curMap newIndex =
-      ( filePath newIndex
-      , newIndex
+      ( newIndex
       , Index.insert newIndex FileInfo.empty curMap
       , FileSize 0 )
 
@@ -570,14 +579,15 @@ mkInternalState hasFS err parser n files =
        -> ReverseIndex blockId
        -> SuccessorsIndex blockId
        -> Maybe (blockId, SlotNo)
-       -> [(FileId, FsPath, FileSize)] -- ^ Info of files with < n blocks.
-       -> [(FileId, FsPath)]
+       -> [(FileId, FileSize)] -- ^ Info of files with < n blocks.
+       -> [FileId]
        -> m (InternalState blockId h)
     go currentMap currentRevMap succMap _maxSlot lessThanN [] = do
-        hndl <- hOpen hasFS fileToWrite (AppendMode AllowExisting)
+        hndl <- hOpen hasFS (blockFile fdToWrite) (AppendMode AllowExisting)
+        metaHndl <- hOpen hasFS (metaFile fdToWrite) (AppendMode AllowExisting)
         return InternalState {
             _currentWriteHandle = hndl
-          , _currentWritePath   = fileToWrite
+          , _currentMetaHandle  = metaHndl
           , _currentWriteId     = fdToWrite
           , _currentWriteOffset = unFileSize offset'
           , _nextNewFileId      = nextNewFileId'
@@ -588,26 +598,30 @@ mkInternalState hasFS err parser n files =
                                     (Index.elems currentMap')
           }
       where
-        (fileToWrite, fdToWrite, currentMap', offset') =
+        (fdToWrite, currentMap', offset') =
           case lastFile of
             Nothing ->
               -- The db is empty. Create a new file with 'FileId' 0.
               newFileInfo currentMap 0
-            Just (lastFd, _) ->
-              case find (\(fileId, _, _) -> fileId == lastFd) lessThanN of
+            Just lastFd ->
+              case find ((== lastFd) . fst) lessThanN of
                 Nothing ->
                   -- If the last file is full, we need to create a new one.
                   newFileInfo currentMap $ lastFd + 1
-                Just (wrFd, wrFile, size) ->
+                Just (wrFd, size) ->
                   -- If the last file is not full, then this is the file
                   -- we're looking for.
-                  (wrFile, wrFd, currentMap, size)
+                  (wrFd, currentMap, size)
         nextNewFileId' = fdToWrite + 1
 
-    go currentMap currentRevMap succMap maxSlot lessThanN ((fd, file):rest) = do
+    go currentMap currentRevMap succMap maxSlot lessThanN (fd : rest) = do
         (blocks, mErr) <- getParsedInfo parser file
+        bs <- withFile hasFS (blockFile fd) ReadMode $ \hndl ->
+          hGetAll hasFS hndl
+        metaData <- hGetAll
         updateAndGo blocks mErr
       where
+        file = blockFile fd
         -- | Updates the state and call 'go' for the rest of the files.
         updateAndGo :: [(SlotOffset, (BlockSize, BlockInfo blockId))]
                     -> Maybe e
@@ -636,7 +650,7 @@ mkInternalState hasFS err parser n files =
               blocks
             newHaveLessThanN = if FileInfo.isFull n fileInfo
               then lessThanN
-              else (fd, file, FileSize offset) : lessThanN
+              else (fd, FileSize offset) : lessThanN
 
 -- | NOTE: This is safe in terms of throwing FsErrors.
 modifyState :: forall blockId m r. (HasCallStack, IOLike m)

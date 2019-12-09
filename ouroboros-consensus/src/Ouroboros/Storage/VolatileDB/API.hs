@@ -24,6 +24,8 @@ import           Ouroboros.Consensus.Util.IOLike
 
 import           Ouroboros.Storage.VolatileDB.Types
 
+import           Ouroboros.Storage.ImmutableDB.Types (BinaryInfo(..))
+
 -- | Open the database using the given function, perform the given action
 -- using the database, and closes the database using its 'closeDB' function,
 -- in case of success or when an exception was raised.
@@ -40,7 +42,7 @@ data VolatileDB blockId m = VolatileDB {
     , isOpenDB       :: HasCallStack => m Bool
     , reOpenDB       :: HasCallStack => m ()
     , getBlock       :: HasCallStack => blockId -> m (Maybe ByteString)
-    , putBlock       :: HasCallStack => BlockInfo blockId -> Builder -> m ()
+    , putBlock       :: HasCallStack => BlockInfo blockId -> BinaryInfo Builder -> m ()
     , getBlockIds    :: HasCallStack => m [blockId]
       -- | Return a function that returns the successors of the block with the
       -- given @blockId@.
@@ -119,4 +121,5 @@ data VolatileDB blockId m = VolatileDB {
     , getIsMember    :: HasCallStack => STM m (blockId -> Bool)
       -- | Return the highest slot number ever stored by the VolatileDB.
     , getMaxSlotNo   :: HasCallStack => STM m MaxSlotNo
+    , getHeader :: HasCallStack => blockId -> m (Maybe ByteString)
 } deriving NoUnexpectedThunks via OnlyCheckIsWHNF "VolatileDB" (VolatileDB blockId m)

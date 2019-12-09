@@ -80,6 +80,7 @@ import           Ouroboros.Storage.ChainDB.API (ChainDbError (..),
 import           Ouroboros.Storage.FS.API (HasFS, createDirectoryIfMissing)
 import           Ouroboros.Storage.FS.API.Types (MountPoint (..), mkFsPath)
 import           Ouroboros.Storage.FS.IO (ioHasFS)
+import           Ouroboros.Storage.ImmutableDB (BinaryInfo (..))
 import           Ouroboros.Storage.Util.ErrorHandling (ErrorHandling,
                      ThrowCantCatch)
 import qualified Ouroboros.Storage.Util.ErrorHandling as EH
@@ -95,7 +96,7 @@ data VolDB m blk = VolDB {
     , decBlock :: forall s. Decoder s (Lazy.ByteString -> blk)
       -- ^ TODO introduce a newtype wrapper around the @s@ so we can use
       -- generics to derive the NoUnexpectedThunks instance.
-    , encBlock :: blk -> Encoding
+    , encBlock :: blk -> BinaryInfo Encoding
     , err      :: ErrorHandling VolatileDBError m
     , errSTM   :: ThrowCantCatch VolatileDBError (STM m)
     }
@@ -121,7 +122,7 @@ data VolDbArgs m blk = forall h. VolDbArgs {
     , volErrSTM        :: ThrowCantCatch VolatileDBError (STM m)
     , volBlocksPerFile :: Int
     , volDecodeBlock   :: forall s. Decoder s (Lazy.ByteString -> blk)
-    , volEncodeBlock   :: blk -> Encoding
+    , volEncodeBlock   :: blk -> BinaryInfo Encoding
     }
 
 -- | Default arguments when using the 'IO' monad
@@ -162,7 +163,7 @@ openDB args@VolDbArgs{..} = do
 -- | For testing purposes
 mkVolDB :: VolatileDB (HeaderHash blk) m
         -> (forall s. Decoder s (Lazy.ByteString -> blk))
-        -> (blk -> Encoding)
+        -> (blk -> BinaryInfo Encoding)
         -> ErrorHandling VolatileDBError m
         -> ThrowCantCatch VolatileDBError (STM m)
         -> VolDB m blk
@@ -189,7 +190,7 @@ getMaxSlotNo db = withSTM db VolDB.getMaxSlotNo
 
 putBlock :: (MonadCatch m, HasHeader blk) => VolDB m blk -> blk -> m ()
 putBlock db@VolDB{..} b = withDB db $ \vol ->
-    VolDB.putBlock vol (extractInfo b) (CBOR.toBuilder (encBlock b))
+    VolDB.putBlock vol (extractInfo b) (CBOR.toBuilder <$> encBlock b)
 
 closeDB :: (MonadCatch m, HasCallStack) => VolDB m blk -> m ()
 closeDB db = withDB db VolDB.closeDB

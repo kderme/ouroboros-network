@@ -15,7 +15,7 @@ import           Control.Exception (Exception (..))
 import           Data.Map.Strict (Map)
 import           Data.Set (Set)
 import           Data.Typeable
-import           Data.Word (Word64)
+import           Data.Word (Word16, Word64)
 import           GHC.Generics (Generic)
 
 import           Cardano.Prelude (NoUnexpectedThunks, first)
@@ -66,6 +66,7 @@ data ParserError =
       forall blockId. (Typeable blockId, Eq blockId, Show blockId) =>
         DuplicatedSlot blockId FsPath FsPath
     | InvalidFilename FsPath
+    | InvalidFileGroups [[FsPath]]
 
 deriving instance Show ParserError
 
@@ -96,6 +97,7 @@ sameParseError :: ParserError -> ParserError -> Bool
 sameParseError e1 e2 = case (e1, e2) of
     (DuplicatedSlot {}, DuplicatedSlot {})       -> True
     (InvalidFilename str1, InvalidFilename str2) -> str1 == str2
+    (InvalidFileGroups _, InvalidFileGroups _)   -> True
     _                                            -> False
 
 newtype FileSize  = FileSize {unFileSize :: Word64}
@@ -131,16 +133,24 @@ type ParsedInfo blockId = [(SlotOffset, (BlockSize, BlockInfo blockId))]
 
 -- | The information that the user has to provide for each new block.
 data BlockInfo blockId = BlockInfo {
-      bbid    :: !blockId
-    , bslot   :: !SlotNo
-    , bpreBid :: !(WithOrigin blockId)
+      bbid         :: !blockId
+    , bslot        :: !SlotNo
+    , bpreBid      :: !(WithOrigin blockId)
+--    , headerOffset :: !Word16
+--    -- ^ The offset within the 'binaryBlob' at which the header starts.
+--    -- See also 'BinaryInfo' documentation for more.
+--    , headerSize   :: !Word16
+--    -- ^ How many bytes the header is long.
+--    -- See also 'BinaryInfo' documentation for more.
     } deriving (Show, Generic, NoUnexpectedThunks)
 
 -- | The internal information the db keeps for each block.
 data InternalBlockInfo blockId = InternalBlockInfo {
-      ibFile       :: !FsPath
-    , ibSlotOffset :: !SlotOffset
-    , ibBlockSize  :: !BlockSize
-    , ibSlot       :: !SlotNo
-    , ibPreBid     :: !(WithOrigin blockId)
+      ibFile         :: !FsPath
+    , ibSlotOffset   :: !SlotOffset
+    , ibBlockSize    :: !BlockSize
+    , ibSlot         :: !SlotNo
+    , ibPreBid       :: !(WithOrigin blockId)
+    , ibHeaderOffset :: !Word16
+    , ibHeaderSize   :: !Word16
     } deriving (Show, Generic, NoUnexpectedThunks)

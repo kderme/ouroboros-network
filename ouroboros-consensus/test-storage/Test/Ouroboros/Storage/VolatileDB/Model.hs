@@ -46,6 +46,7 @@ import           Ouroboros.Network.Point (WithOrigin)
 import           Ouroboros.Consensus.Util (safeMaximum)
 
 import           Ouroboros.Storage.FS.API.Types
+import           Ouroboros.Storage.ImmutableDB.Types (BinaryInfo(..))
 import           Ouroboros.Storage.Util.ErrorHandling (ThrowCantCatch)
 import qualified Ouroboros.Storage.Util.ErrorHandling as EH
 import           Ouroboros.Storage.VolatileDB.API
@@ -126,7 +127,7 @@ putBlockModel :: MonadState (DBModel blockId) m
               => ThrowCantCatch VolatileDBError m
               -> Maybe Errors
               -> BlockInfo blockId
-              -> Builder
+              -> BinaryInfo Builder
               -> m ()
 putBlockModel err cmdErr BlockInfo{..} bs = do
     -- This depends on the exact sequence of the operations in the real Impl.
@@ -153,7 +154,7 @@ putBlockModel err cmdErr BlockInfo{..} bs = do
                     , fsLimitation = False
                 }
             Nothing -> do
-                let mp' = Map.insert bbid (toLazyByteString bs) mp
+                let mp' = Map.insert bbid (toLazyByteString $ binaryBlob bs) mp
                     (mbid, n, bids) = fromMaybe
                         (error "current file does not exist in index")
                         (Map.lookup currentFile index)
