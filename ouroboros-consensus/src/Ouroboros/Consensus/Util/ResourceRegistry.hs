@@ -15,6 +15,7 @@ module Ouroboros.Consensus.Util.ResourceRegistry (
   , ResourceRegistryThreadException
     -- * Creating and releasing the registry itself
   , withRegistry
+  , withRegistryOnError
   , registryThread
     -- * Allocating and releasing regular resources
   , ResourceKey
@@ -512,15 +513,7 @@ unsafeNewRegistry = do
 -- exceptions.
 closeRegistry :: (IOLike m, HasCallStack) => ResourceRegistry m -> m ()
 closeRegistry rr = mask_ $ do
-    context <- captureContext
-    unless (contextThreadId context == contextThreadId (registryContext rr)) $
-      throwM $ ResourceRegistryClosedFromWrongThread {
-          resourceRegistryCreatedIn = registryContext rr
-        , resourceRegistryUsedIn    = context
-        }
-
-    -- Close the registry so that we cannot allocate any further resources
-    alreadyClosed <- updateState rr $ close (contextCallStack context)
+    alreadyClosed <- closeRegistryState rr
     case alreadyClosed of
       Left _ ->
         return ()
@@ -534,6 +527,21 @@ closeRegistry rr = mask_ $ do
         -- /If/ a concurrent thread does some cleanup, then some of the calls
         -- to 'release' that we do here might be no-ops.
        releaseResources rr keys release
+
+-- | Simply closes the registry, without releasing any resources.
+closeRegistryState ::  (IOLike m, HasCallStack)
+                   => ResourceRegistry m
+                   -> m (Either PrettyCallStack (Set ResourceId))
+closeRegistryState rr = do
+    context <- captureContext
+    unless (contextThreadId context == contextThreadId (registryContext rr)) $
+      throwM $ ResourceRegistryClosedFromWrongThread {
+          resourceRegistryCreatedIn = registryContext rr
+        , resourceRegistryUsedIn    = context
+        }
+
+    -- Close the registry so that we cannot allocate any further resources
+    updateState rr $ close (contextCallStack context)
 
 -- | Helper for 'closeRegistry', 'releaseAll', and 'unsafeReleaseAll': release
 -- the resources allocated with the given 'ResourceId's.
@@ -566,6 +574,17 @@ releaseResources rr keys releaser = do
 -- See documentation of 'ResourceRegistry' for a detailed discussion.
 withRegistry :: (IOLike m, HasCallStack) => (ResourceRegistry m -> m a) -> m a
 withRegistry = bracket unsafeNewRegistry closeRegistry
+
+-- | Like 'withRegistry', but it only releases the resources of the registry
+-- if there is some exception.
+withRegistryOnError :: (IOLike m, HasCallStack)
+                    => (ResourceRegistry m -> m a)
+                    -> m a
+withRegistryOnError action =
+    bracketOnError unsafeNewRegistry closeRegistry $ \rr -> do
+      a <- action rr
+      void $ closeRegistryState rr
+      return a
 
 {-------------------------------------------------------------------------------
   Simple queries on the registry
