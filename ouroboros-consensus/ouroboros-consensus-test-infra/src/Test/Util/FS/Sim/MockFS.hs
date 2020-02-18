@@ -23,6 +23,7 @@ module Test.Util.FS.Sim.MockFS (
   , example
   , pretty
   , handleIsOpen
+  , getOffset
   , numOpenHandles
     -- * Debugging
   , dumpState
@@ -33,6 +34,7 @@ module Test.Util.FS.Sim.MockFS (
   , hGetSome
   , hGetSomeAt
   , hPutSome
+  , hPutSomeAt
   , hTruncate
   , hGetSize
     -- * Operations on directories
@@ -177,6 +179,14 @@ openFilePaths MockFS{..} = foldMap handleOpenFilePath $ M.elems mockHandles
     handleOpenFilePath :: HandleState -> Set FsPath
     handleOpenFilePath (HandleOpen hs)  = S.singleton $ openFilePath hs
     handleOpenFilePath (HandleClosed _) = S.empty
+
+-- | Fails with 'Nothing', if the handle is closed or is open in 'AppendMode'.
+getOffset :: MockFS -> HandleMock -> Maybe Word64
+getOffset MockFS{..} h = case mockHandles M.! h of
+    HandleClosed (ClosedHandle _) -> Nothing
+    HandleOpen (OpenHandle {..}) -> case openPtr of
+      RW _ _ offset -> Just offset
+      _             -> Nothing
 
 -- | Number of open handles
 numOpenHandles :: MockFS -> Int
@@ -592,7 +602,7 @@ hPutSome err@ErrorHandling{..} h toWrite =
         RW r w o -> do
           unless w $ throwError (errReadOnly openFilePath)
           file <- checkFsTree err $ FS.getFile openFilePath (mockFiles fs)
-          let file' = replace o toWrite file
+          let file' = replaceBytes o toWrite file
           files' <- checkFsTree err $ FS.replace openFilePath file' (mockFiles fs)
           return (written, (files', hs { openPtr = RW r w (o + written) }))
         Append -> do
@@ -612,35 +622,99 @@ hPutSome err@ErrorHandling{..} h toWrite =
                        , fsLimitation  = False
                        }
 
-    -- Given
-    --
-    -- >        A        B         C
-    -- > |-----------|-------.-----------|
-    -- >             n       .
-    -- >                     .
-    -- >                 D   .
-    -- >             |-------|
-    --
-    -- return A <> D <> C
-    replace :: Word64 -> ByteString -> ByteString -> ByteString
-    replace n d abc = a <> d <> c
-      where
-        (a, c) = snip (fromIntegral n) (BS.length d) abc
+hPutSomeAt :: CanSimFS m
+           => ErrorHandling FsError m
+           -> Handle'
+           -> ByteString
+           -> AbsOffset
+           -> m Word64
+hPutSomeAt err@ErrorHandling{..} h toWrite o =
+    withOpenHandleModify err h $ \fs hs@OpenHandle{..} ->
+      if BS.length toWrite == 0
+      then
+        -- The Haskell unix wrapper of @pwrite@ always returns 0 when we write 0
+        -- bytes, even when the operation is illegal, i.e. we write to a read
+        -- only file. Actually no system call is performed in this case.
+        return (0, (mockFiles fs, hs))
+      else case openPtr of
+        RW _ w _ -> do
+          unless w $ throwError (errReadOnly openFilePath)
+          file <- checkFsTree err $ FS.getFile openFilePath (mockFiles fs)
+          let fsize = fromIntegral (BS.length file) :: Word64
+          let o' = unAbsOffset o
+          when (o' > fsize) $ throwError (errPastEnd openFilePath)
+          let file' = replaceBytes o' toWrite file
+          files' <- checkFsTree err $ FS.replace openFilePath file' (mockFiles fs)
+          return (written, (files', hs))
+        Append ->
+          -- We don't allow pwrite on append mode.
+          -- From pwrite(2) under BUGS section:
+          --
+          -- "POSIX requires that opening a file with the O_APPEND flag should
+          -- have no effect on the location at which pwrite() writes data.
+          -- However, on Linux, if a file is opened with O_APPEND,  pwrite()
+          -- appends data to the end of the file, regardless of the value of
+          -- offset."
+          throwError (errNoWriteAccess openFilePath "append")
+  where
+    written = toEnum $ BS.length toWrite
 
-    -- Given
-    --
-    -- >       A         B         C
-    -- > |-----------|-------|-----------|
-    -- >             n
-    -- >             <------->
-    -- >                 m
-    --
-    -- return (A, C)
-    snip :: Int -> Int -> ByteString -> (ByteString, ByteString)
-    snip n m bs = (a, c)
-      where
-        (a, bc) = BS.splitAt (fromIntegral n) bs
-        c       = BS.drop m bc
+    errReadOnly fp = FsError {
+        fsErrorType   = FsInvalidArgument
+      , fsErrorPath   = fsToFsErrorPathUnmounted fp
+      , fsErrorString = "handle is read-only"
+      , fsErrorNo     = Nothing
+      , fsErrorStack  = callStack
+      , fsLimitation  = False
+      }
+
+    errNoWriteAccess fp mode = FsError {
+        fsErrorType   = FsInvalidArgument
+      , fsErrorPath   = fsToFsErrorPathUnmounted fp
+      , fsErrorString = "cannot hPutSomeAt in " <> mode <> " mode"
+      , fsErrorNo     = Nothing
+      , fsErrorStack  = callStack
+      , fsLimitation  = True
+      }
+
+    errPastEnd fp = FsError {
+        fsErrorType   = FsInvalidArgument
+      , fsErrorPath   = fsToFsErrorPathUnmounted fp
+      , fsErrorString = "hPutSomeAt offset past EOF not supported"
+      , fsErrorNo     = Nothing
+      , fsErrorStack  = callStack
+      , fsLimitation  = True
+      }
+
+-- Given
+--
+-- >        A        B         C
+-- > |-----------|-------.-----------|
+-- >             n       .
+-- >                     .
+-- >                 D   .
+-- >             |-------|
+--
+-- return A <> D <> C
+replaceBytes :: Word64 -> ByteString -> ByteString -> ByteString
+replaceBytes n d abc = a <> d <> c
+  where
+    (a, c) = snip (fromIntegral n) (BS.length d) abc
+
+-- Given
+--
+-- >       A         B         C
+-- > |-----------|-------|-----------|
+-- >             n
+-- >             <------->
+-- >                 m
+--
+-- return (A, C)
+snip :: Int -> Int -> ByteString -> (ByteString, ByteString)
+snip n m bs = (a, c)
+  where
+    (a, bc) = BS.splitAt (fromIntegral n) bs
+    c       = BS.drop m bc
 
 -- | Truncate a file
 --

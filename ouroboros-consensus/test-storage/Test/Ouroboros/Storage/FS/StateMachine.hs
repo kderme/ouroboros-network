@@ -121,6 +121,7 @@ data Cmd fp h =
   | Get                h Word64
   | GetAt              h Word64 AbsOffset
   | Put                h ByteString
+  | PutAt              h ByteString AbsOffset
   | Truncate           h Word64
   | GetSize            h
   | CreateDir          (PathExpr fp)
@@ -163,12 +164,13 @@ run hasFS@HasFS{..} = go
     go (CreateDirIfMissing b pe) = withPE pe Path   $ createDirectoryIfMissing b
     go (Close    h             ) = Unit       <$> hClose    h
     go (Seek     h mode sz     ) = Unit       <$> hSeek     h mode sz
-    -- Note: we're not using 'hGetSome', 'hGetSomeAt' and 'hPutSome' that may
-    -- produce partial reads/writes, but wrappers around them that handle
-    -- partial reads/writes, see #502.
+    -- Note: we're not using 'hGetSome', 'hGetSomeAt', 'hPutSome', 'hPutSomeAt'
+    -- that may produce partial reads/writes, but wrappers around them that
+    -- handle partial reads/writes, see #502.
     go (Get      h n           ) = ByteString <$> hGetSomeChecked hasFS h n
     go (GetAt    h n o         ) = ByteString <$> hGetSomeAtChecked hasFS h n o
     go (Put      h bs          ) = Word64     <$> hPutSomeChecked hasFS h bs
+    go (PutAt    h bs o        ) = Word64     <$> hPutSomeAtChecked hasFS h bs o
     go (Truncate h sz          ) = Unit       <$> hTruncate h sz
     go (GetSize  h             ) = Word64     <$> hGetSize  h
     go (ListDirectory      pe  ) = withPE pe (const Strings) $ listDirectory
@@ -187,9 +189,9 @@ run hasFS@HasFS{..} = go
   Detecting partial reads/writes of the tested IO implementation
 -------------------------------------------------------------------------------}
 
--- The functions 'hGetSome', 'hGetSomeAt' and 'hPutSome' might perform partial
--- reads/writes, depending on the underlying implementation, see #277. While
--- the model will always perform complete reads/writes, the real IO
+-- The functions 'hGetSome', 'hGetSomeAt', 'hPutSome' and 'hPutSomeAt' might
+-- perform partial reads/writes, depending on the underlying implementation, see
+-- #277. While the model will always perform complete reads/writes, the real
 -- implementation we are testing /might/ actually perform partial reads/writes.
 -- This testsuite will fail when such a partial read or write is performed in
 -- the real IO implementation, as these are undeterministic and the model will
@@ -199,15 +201,18 @@ run hasFS@HasFS{..} = go
 -- So far, on all systems the tests have been run on, no partial reads/writes
 -- have ever been noticed. However, we cannot be sure that the tests will
 -- never be run on a system or file-system that might result in partial
--- reads/writes. Therefore, we use checked variants of 'hGetSome', 'hGetSomeAt'
--- and 'hPutSome' that detect partial reads/writes and that will signal an
--- error so that the developer noticing the failing test doesn't waste any time
--- debugging the implementation while the failing test was actually due to an
--- unexpected partial read/write.
+-- reads/writes. Therefore, we use checked variants of 'hGetSome', 'hGetSomeAt',
+-- 'hPutSome' and 'hPutSomeAt' that detect partial reads/writes and that will
+-- signal an error so that the developer noticing the failing test doesn't waste
+-- any time debugging the implementation while the failing test was actually due
+-- to an unexpected partial read/write.
 --
--- While using the wrappers 'hGetExactly' and 'hPutAll' instead of 'hGetSome',
--- 'hGetSomeAt' and 'hPut' in the implementation of 'run' will opaquely handle
--- any potential partial reads/writes, it is not a good solution. The problem
+-- While using the wrappers:
+--   'hGetExactly', 'hGetExactlyAt', 'hPutAll',  'hPutAllAt'
+-- instead of:
+--   'hGetSome',    'hGetSomeAt',    'hPutSome', 'hPutSomeAt'
+-- in the implementation of 'run' will opaquely handle any potential partial
+-- reads/writes, it is not a good solution. The problem
 -- is that to run a single 'Cmd', we now have to run multiple primitive 'HasFS'
 -- functions. Each of those primitive functions might update the state of the
 -- model and the real world. Now when the second, third, ..., or n-th
@@ -246,6 +251,14 @@ hPutSomeChecked :: (Monad m, HasCallStack)
                 => HasFS m h -> Handle h -> ByteString -> m Word64
 hPutSomeChecked HasFS{..} h bytes = do
     n <- hPutSome h bytes
+    if fromIntegral (BS.length bytes) /= n
+      then error "Unsupported partial write detected, see #502"
+      else return n
+
+hPutSomeAtChecked :: (Monad m, HasCallStack)
+                  => HasFS m h -> Handle h -> ByteString -> AbsOffset -> m Word64
+hPutSomeAtChecked HasFS{..} h bytes o = do
+    n <- hPutSomeAt h bytes o
     if fromIntegral (BS.length bytes) /= n
       then error "Unsupported partial write detected, see #502"
       else return n
@@ -460,6 +473,7 @@ generator Model{..} = oneof $ concat [
         , fmap At $ Get      <$> genHandle <*> (getSmall <$> arbitrary)
         , fmap At $ GetAt    <$> genHandle <*> (getSmall <$> arbitrary) <*> arbitrary
         , fmap At $ Put      <$> genHandle <*> (BS.pack <$> arbitrary)
+        , fmap At $ PutAt    <$> genHandle <*> (BS.pack <$> arbitrary) <*> arbitrary
         , fmap At $ Truncate <$> genHandle <*> (getSmall . getNonNegative <$> arbitrary)
         , fmap At $ GetSize  <$> genHandle
         ]
@@ -584,12 +598,15 @@ shrinker Model{..} (At cmd) =
           fp :: FsPath
           fp = resolvePathExpr knownPaths pe
 
-      Get      h n   -> At . Get      h <$> shrink n
-      GetAt    h n o -> At <$>
+      Get      h n    -> At . Get      h <$> shrink n
+      GetAt    h n o  -> At <$>
         [GetAt h n o' | o' <- shrink o] <>
         [GetAt h n' o | n' <- shrink n]
-      Put      h bs  -> At . Put      h <$> shrinkBytes bs
-      Truncate h n   -> At . Truncate h <$> shrink n
+      Put      h bs   -> At . Put      h <$> shrinkBytes bs
+      PutAt    h bs o -> At <$>
+        [PutAt h bs o' | o'  <- shrink o      ] <>
+        [PutAt h bs' o | bs' <- shrinkBytes bs]
+      Truncate h n    -> At . Truncate h <$> shrink n
 
       _otherwise ->
           []
@@ -768,6 +785,12 @@ data Tag =
   -- > Put h1
   | TagWrite
 
+  -- | Use pwrite to write both before and after the file offset.
+  --
+  -- > h1 <- Open fp WriteMode
+  -- > PutAt h1
+  | TagOverwriteAndNew
+
   -- | Seek from end of a file
   --
   -- > Seek h IO.SeekFromEnd n (n<0)
@@ -904,6 +927,7 @@ tag = C.classify [
     , tagWriteWriteRead Map.empty
     , tagOpenDirectory Set.empty
     , tagWrite
+    , tagOverwriteAndNew
     , tagSeekFromEnd
     , tagCreateDirectory
     , tagDoesFileExistOK
@@ -992,9 +1016,13 @@ tag = C.classify [
                       -> EventPred
     tagPutTruncateGet put truncated = successful $ \ev _ ->
       case eventMockCmd  ev of
-        Put (Handle h fp) bs | BS.length bs /= 0 ->
-          let
-              f Nothing  = Just $ BS.length bs
+        Put (Handle h fp) bs | not (BS.null bs) ->
+          let f Nothing  = Just $ BS.length bs
+              f (Just n) = Just $ (BS.length bs) + n
+              put' = Map.alter f (h, fp) put
+          in Right $ tagPutTruncateGet put' truncated
+        PutAt (Handle h fp) bs _ | not (BS.null bs) ->
+          let f Nothing  = Just $ BS.length bs
               f (Just n) = Just $ (BS.length bs) + n
               put' = Map.alter f (h, fp) put
           in Right $ tagPutTruncateGet put' truncated
@@ -1087,7 +1115,11 @@ tag = C.classify [
     tagWriteWriteRead :: Map (HandleMock, FsPath) Int -> EventPred
     tagWriteWriteRead wr = successful $ \ev@Event{..} _ ->
       case eventMockCmd ev of
-        Put (Handle h fp) bs | BS.length bs > 0 ->
+        Put (Handle h fp) bs | not (BS.null bs) ->
+          let f Nothing  = Just 0
+              f (Just x) = Just $ x + 1
+          in Right $ tagWriteWriteRead $ Map.alter f (h, fp) wr
+        PutAt (Handle h fp) bs _ | not (BS.null bs) ->
           let f Nothing  = Just 0
               f (Just x) = Just $ x + 1
           in Right $ tagWriteWriteRead $ Map.alter f (h, fp) wr
@@ -1125,6 +1157,19 @@ tag = C.classify [
         Put _ bs | BS.length bs > 0 ->
           Left TagWrite
         _otherwise -> Right tagWrite
+
+    tagOverwriteAndNew :: EventPred
+    tagOverwriteAndNew = successful $ \ev@Event{..} _ ->
+      case eventMockCmd ev of
+        PutAt h bs o ->
+          case Mock.getOffset (mockFS eventBefore) (handleRaw h) of
+            Nothing -> Right tagOverwriteAndNew
+            Just fileOffset ->
+              if (unAbsOffset o < fileOffset) &&
+                 (unAbsOffset o + fromIntegral (BS.length bs) > fileOffset)
+              then Left TagOverwriteAndNew
+              else Right tagOverwriteAndNew
+        _otherwise -> Right tagOverwriteAndNew
 
     tagSeekFromEnd :: EventPred
     tagSeekFromEnd = successful $ \ev@Event{..} _ ->
@@ -1410,6 +1455,7 @@ instance (Condense fp, Condense h) => Condense (Cmd fp h) where
       go (Get h n)                 = ["get", condense h, condense n]
       go (GetAt h n o)             = ["getAt", condense h, condense n, condense o]
       go (Put h bs)                = ["put", condense h, condense bs]
+      go (PutAt h bs o)            = ["putAt", condense h, condense bs, condense o]
       go (Truncate h sz)           = ["truncate", condense h, condense sz]
       go (GetSize h)               = ["getSize", condense h]
       go (CreateDir fp)            = ["createDir", condense fp]
