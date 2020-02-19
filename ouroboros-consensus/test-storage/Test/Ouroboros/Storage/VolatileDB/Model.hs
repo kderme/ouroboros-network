@@ -15,6 +15,7 @@ module Test.Ouroboros.Storage.VolatileDB.Model
     , reOpenModel
     , getBlockComponentModel
     , putBlockModel
+    , putBlockModelAsync
     , garbageCollectModel
     , getSuccessorsModel
     , getPredecessorModel
@@ -68,6 +69,16 @@ data DBModel blockId = DBModel {
       --
       -- INVARIANT: the 'BlocksInFile' associated with the highest 'FileId'
       -- has always fewer than 'blocksPerFile' blocks.
+    , diskOutOfSync :: Bool
+      -- ^Flag which shows that an async exception was thrown while accessing
+      -- the db.
+      --
+      -- An exception (commonly an async exception) may cause the filesystem
+      -- and the in memory state to go out of sync. In these cases it is
+      -- impossible to know in which state the db will recover if we close
+      -- and reopen it. This is because, we can't know the exact effect the
+      -- exception had. This flags is used to forbit any Commands which can
+      -- cause the db to reopen.
     }
   deriving (Show, Generic)
 
@@ -76,6 +87,7 @@ initDBModel blocksPerFile = DBModel {
       blocksPerFile = blocksPerFile
     , open          = True
     , fileIndex     = Map.singleton 0 emptyFile
+    , diskOutOfSync = False
     }
 
 blockIndex
@@ -287,6 +299,15 @@ putBlockModel blockInfo@BlockInfo { bbid } builder dbm = whenOpen dbm $
     DBModel { fileIndex } = dbm
 
     bytes = toLazyByteString builder
+
+-- | TODO: there is currently no way to restore the @diskOutOfSync = False@.
+-- This could change, for example when all possibly stale bytes are ovewritten
+-- by successful calls to @putBlock@.
+putBlockModelAsync :: forall blockId
+                   .  DBModel blockId
+                   -> DBModel blockId
+putBlockModelAsync dbm =
+    dbm {diskOutOfSync = True}
 
 garbageCollectModel
   :: forall blockId.

@@ -26,11 +26,12 @@ import           Data.Functor.Classes
 import           Data.Kind (Type)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map as Map
-import           Data.Maybe (listToMaybe, mapMaybe)
+import           Data.Maybe (isJust, listToMaybe, mapMaybe)
 import           Data.Proxy (Proxy (..))
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.TreeDiff (ToExpr (..))
+import           Data.Typeable
 import           Data.Word
 import qualified Generics.SOP as SOP
 import           GHC.Generics
@@ -50,10 +51,12 @@ import           Ouroboros.Consensus.Util.IOLike
 import           Ouroboros.Consensus.Storage.ChainDB.Impl.VolDB
                      (blockFileParser')
 import           Ouroboros.Consensus.Storage.Common
-import           Ouroboros.Consensus.Storage.FS.API (HasFS, hPutAll, withFile)
+import           Ouroboros.Consensus.Storage.FS.API (HasFS (..), hPutAll,
+                     withFile)
 import           Ouroboros.Consensus.Storage.FS.API.Types
 import qualified Ouroboros.Consensus.Storage.Util.ErrorHandling as EH
 import           Ouroboros.Consensus.Storage.VolatileDB
+import qualified Ouroboros.Consensus.Storage.VolatileDB.Impl as Internal
 import           Ouroboros.Consensus.Storage.VolatileDB.Util
 
 import           Test.QuickCheck
@@ -120,6 +123,7 @@ data Cmd
     | ReOpen
     | GetBlockComponent BlockId
     | PutBlock TestBlock
+    | PutBlockAsync TestBlock
     | GarbageCollect SlotNo
     | GetSuccessors [Predecessor]
     | GetPredecessor [BlockId]
@@ -144,7 +148,19 @@ data Success
     | Successors      [Set BlockId]
     | Predecessor     [Predecessor]
     | MaxSlot         MaxSlotNo
+    | Async           (Metadata Bool)
     deriving (Show, Eq)
+
+-- | A type used to store metadata to tag a test. Testing equality of 'Metadata'
+-- is trivial: it always returns 'True'
+data Metadata a = Metadata a | NoMetadata
+
+instance Show a => Show (Metadata a) where
+    show (Metadata a) = show a
+    show (NoMetadata) = show "NoMetadata"
+
+instance Eq (Metadata a) where
+    _ == _ = True
 
 newtype Resp = Resp {
       getResp :: Either VolatileDBError Success
@@ -249,6 +265,7 @@ runPure = \case
       where
         blockInfo = testBlockToBlockInfo b
         blob      = testBlockToBuilder b
+    PutBlockAsync _tb     -> ok Async                      $ update    putBlockModelAsync NoMetadata
     Corruption cors       -> ok Unit                       $ update_  (withClosedDB (runCorruptionsModel cors))
     DuplicateBlock {}     -> ok Unit                       $ update_  (withClosedDB noop)
   where
@@ -257,6 +274,7 @@ runPure = \case
     queryE f m = (f m, m)
 
     update_ f m = (Right (), f m)
+    update f a m = (Right a, f m)
     updateE_ f m = case f m of
       Left  e  -> (Left e, m)
       Right m' -> (Right (), m')
@@ -303,7 +321,7 @@ transitionImpl model cmd _ = eventAfter $ lockstep model cmd
 
 preconditionImpl :: Model Symbolic -> At CmdErr Symbolic -> Logic
 preconditionImpl Model{..} (At (CmdErr cmd mbErrors)) =
-    compatibleWithError .&& case cmd of
+    compatibleWithError .&& compatibleWithOutOfSync .&& case cmd of
       GetPredecessor bids -> forall bids (`elem` bidsInModel)
       Corruption cors ->
         forall (corruptionFiles cors) (`elem` getDBFiles dbModel)
@@ -315,8 +333,15 @@ preconditionImpl Model{..} (At (CmdErr cmd mbErrors)) =
       DuplicateBlock fileId b _ -> case fileIdContainingBlock b of
         Nothing      -> Bot
         Just fileId' -> fileId .>= fileId'
+      PutBlockAsync _tb -> Boolean $ open $ dbModel
       _ -> Top
   where
+    -- | When the disk is out of sync, we should not close the db, or else
+    -- reopening can produce unexpected results.
+    compatibleWithOutOfSync :: Logic
+    compatibleWithOutOfSync = Boolean $
+      not (diskOutOfSync dbModel && (isJust mbErrors || closingCmd cmd))
+
     -- | All the 'BlockId' in the db.
     bidsInModel :: [BlockId]
     bidsInModel = blockIds dbModel
@@ -337,6 +362,13 @@ preconditionImpl Model{..} (At (CmdErr cmd mbErrors)) =
       , bbid == b
       ]
 
+    -- | Cmds which close the db.
+    closingCmd :: Cmd -> Bool
+    closingCmd Corruption {}        = True
+    closingCmd DuplicateBlock {}    = True
+    closingCmd Close {}             = True
+    closingCmd _                    = False
+
 postconditionImpl :: Model Concrete
                   -> At CmdErr Concrete
                   -> At Resp Concrete
@@ -348,21 +380,24 @@ postconditionImpl model cmdErr resp =
 
 generatorCmdImpl :: Model Symbolic -> Gen Cmd
 generatorCmdImpl Model {..} = frequency
-    [ (3, PutBlock <$> genTestBlock)
-    , (1, return IsOpen)
-    , (1, return Close)
+    [ (30, PutBlock <$> genTestBlock)
+    , (10, return IsOpen)
+    , (10, return Close)
       -- When the DB is closed, we try to reopen it ASAP.
-    , (if open dbModel then 1 else 5, return ReOpen)
-    , (2, GetBlockComponent <$> genBlockId)
-    , (2, GarbageCollect <$> genGCSlot)
-    , (2, GetIsMember <$> listOf genBlockId)
-    , (2, GetPredecessor <$> listOf genBlockId)
-    , (2, GetSuccessors <$> listOf genWithOriginBlockId)
-    , (2, return GetMaxSlotNo)
+    , (if open dbModel then 10 else 50, return ReOpen)
+    , (20, GetBlockComponent <$> genBlockId)
+    , (20, GarbageCollect <$> genGCSlot)
+    , (20, GetIsMember <$> listOf genBlockId)
+    , (20, GetPredecessor <$> listOf genBlockId)
+    , (20, GetSuccessors <$> listOf genWithOriginBlockId)
+    , (20, return GetMaxSlotNo)
+      -- This should be a rare command, since it is forbidden for many other
+      -- commands to be run after it.
+    , (5, PutBlockAsync <$> genTestBlock)
 
-    , (if null dbFiles then 0 else 1,
+    , (if null dbFiles then 0 else 10,
        Corruption <$> generateCorruptions (NE.fromList dbFiles))
-    , (if isEmpty then 0 else 1, genDuplicateBlock)
+    , (if isEmpty then 0 else 10, genDuplicateBlock)
     ]
   where
     blockIdx = blockIndex dbModel
@@ -470,6 +505,7 @@ generatorImpl m@Model {..} = Just $ do
 allowErrorFor :: Cmd -> Bool
 allowErrorFor Corruption {}     = False
 allowErrorFor DuplicateBlock {} = False
+allowErrorFor PutBlockAsync {}  = False
 allowErrorFor _                 = True
 
 shrinkerImpl :: Model Symbolic -> At CmdErr Symbolic -> [At CmdErr Symbolic]
@@ -490,6 +526,7 @@ data VolatileDBEnv h = VolatileDBEnv
   { varErrors :: StrictTVar IO Errors
   , hasFS     :: HasFS IO h
   , db        :: VolatileDB BlockId IO
+  , varState  :: StrictMVar IO (OpenOrClosed BlockId h)
   }
 
 semanticsImpl :: VolatileDBEnv h -> At CmdErr Concrete -> IO (At Resp Concrete)
@@ -511,9 +548,10 @@ runDB :: HasCallStack
       => VolatileDBEnv h
       -> Cmd
       -> IO Success
-runDB VolatileDBEnv { db, hasFS } cmd = case cmd of
+runDB VolatileDBEnv { db, hasFS, varState } cmd = case cmd of
     GetBlockComponent bid -> MbAllComponents          <$> getBlockComponent db allComponents bid
     PutBlock b            -> Unit                     <$> putBlock db (testBlockToBlockInfo b) (testBlockToBuilder b)
+    PutBlockAsync tb      -> Async                    <$> putBlockException tb
     GetSuccessors  bids   -> Successors .  (<$> bids) <$> atomically (getSuccessors db)
     GetPredecessor bids   -> Predecessor . (<$> bids) <$> atomically (getPredecessor db)
     GetIsMember    bids   -> IsMember .    (<$> bids) <$> atomically (getIsMember db)
@@ -536,6 +574,33 @@ runDB VolatileDBEnv { db, hasFS } cmd = case cmd of
       action
       reOpenDB db
       return $ Unit ()
+
+    -- We fork a thread which inserts the block and throw an async exception
+    -- to it.
+    putBlockException tb = do
+      mstBefore <- readMVar varState
+      withAsync (putBlock db (testBlockToBlockInfo tb) (testBlockToBuilder tb))
+          $ \conc -> do
+        let threadId = asyncThreadId (Proxy :: Proxy IO) conc
+        throwTo threadId CatchableAsyncException
+        res <- waitCatch conc
+        -- It is possible that the exception had no effect (thrown too late).
+        -- In this case, we have to manually restore the previous internal
+        -- state. But forgetting about the updated internal state may leak
+        -- handles, so we have to close those first.
+        mstAfter <- swapMVar varState $ Internal.tagException True mstBefore
+        case mstAfter of
+          Internal.VolatileDbClosed -> return ()
+          Internal.VolatileDbOpen st ->
+              hClose hasFS $ Internal._currentWriteHandle st
+        case res of
+          Right () -> return $ Metadata False
+          Left e -> case fromException e of
+            Just CatchableAsyncException -> return $ Metadata True
+            Nothing -> throwM e
+
+data CatchableAsyncException = CatchableAsyncException
+    deriving (Show, Typeable, Exception)
 
 mockImpl :: Model Symbolic -> At CmdErr Symbolic -> GenSym (At Resp Symbolic)
 mockImpl model cmdErr = At <$> return mockResp
@@ -562,6 +627,8 @@ prop_sequential = forAllCommands smUnused Nothing $ \cmds -> monadicIO $ do
           (tagGetSuccessors events)
         $ tabulate "Predecessor"
           (tagGetPredecessor events)
+        $ tabulate "Async Exceptions"
+          (tagAsyncException hist)
         $ prop
   where
     dbm = initDBModel maxBlocksPerFile
@@ -585,10 +652,10 @@ test cmds = do
           testBlockToBinaryInfo (const <$> decode) testBlockIsValid
           ValidateAll
 
-    db <- run $
-      openDB hasFS EH.monadCatch errSTM parser tracer maxBlocksPerFile
+    (db, varState) <- run $
+      openDBFull hasFS EH.monadCatch errSTM parser tracer maxBlocksPerFile
 
-    let env = VolatileDBEnv { varErrors, db, hasFS }
+    let env = VolatileDBEnv { varErrors, db, hasFS, varState }
         sm' = sm env dbm
     (hist, _model, res) <- runCommands sm' cmds
 
@@ -646,6 +713,7 @@ tag ls = C.classify
     , tagCorruptWriteFile
     , tagIsClosedError
     , tagGarbageCollectThenReOpen
+    , tagAsyncAfterAsync False
     ] ls
   where
 
@@ -724,6 +792,13 @@ tag ls = C.classify
                             Left TagGarbageCollectThenReOpen
       _                -> Right $ tagGarbageCollectThenReOpen
 
+    tagAsyncAfterAsync :: Bool -> EventPred
+    tagAsyncAfterAsync firstCame =
+      successful $ \ev _ -> case (getCmd ev, firstCame) of
+        (PutBlockAsync _, True)  -> Left TagAsyncAfterAsync
+        (PutBlockAsync _, False) -> Right $ tagAsyncAfterAsync True
+        _                        -> Right $ tagAsyncAfterAsync firstCame
+
 getCmd :: Event r -> Cmd
 getCmd ev = cmd $ unAt (eventCmd ev)
 
@@ -796,6 +871,11 @@ data Tag =
     -- > ReOpen
     | TagGarbageCollectThenReOpen
 
+    -- | Use PutBlockAsync twice
+    --
+    -- > PutBlockAsync
+    -- > PutBlockAsync
+    | TagAsyncAfterAsync
     deriving Show
 
 tagSimulatedErrors :: [Event Symbolic] -> [String]
@@ -824,6 +904,15 @@ tagGetPredecessor = mapMaybe f
         (GetPredecessor _pid, Resp (Right (Predecessor _))) ->
             Just "Predecessor"
         _otherwise -> Nothing
+
+tagAsyncException :: History (At CmdErr) (At Resp) -> [String]
+tagAsyncException = mapMaybe (\(_, event) -> isAsync event). unHistory
+  where
+    isAsync ev = case ev of
+      Response (At (Resp (Right (Async (Metadata True)))))  -> Just "Caught"
+      Response (At (Resp (Right (Async (Metadata False))))) -> Just "Not Caught"
+      _                                                     -> Nothing
+
 
 execCmd :: Model Symbolic
         -> Command (At CmdErr) (At Resp)
