@@ -1,4 +1,4 @@
-resolver: https://raw.githubusercontent.com/input-output-hk/cardano-prelude/3893f21db1665e7bab9e8c6504c547fc7c28f98c/snapshot.yaml
+resolver: https://raw.githubusercontent.com/input-output-hk/cardano-prelude/fe76ec64f6b45259cc407a6d840dad79ee6063b6/snapshot.yaml
 
 packages:
   - ./typed-protocols
@@ -74,6 +74,9 @@ extra-deps:
       - .
       - test
 
+  - git: https://github.com/input-output-hk/cardano-crypto/
+    commit: 2547ad1e80aeabca2899951601079408becbc92c
+
   - git: https://github.com/advancedtelematic/quickcheck-state-machine
     commit: 2bf37003ca1c0c57e4354610d7c47da0a0e77b5c
 
@@ -91,6 +94,7 @@ extra-deps:
 
   # Windows only
   - Win32-2.6.2.0
+  - hedgehog-1.0.1@sha256:b65b1ebde7b7fe8e693070916e45aa2ed63eea5e3f84ac3a8f9a0b7f8fcf0337
 
 nix:
   shell-file: nix/stack-shell.nix
