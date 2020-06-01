@@ -17,6 +17,7 @@ import           Test.Tasty.QuickCheck
 
 import           Cardano.Slotting.Slot (EpochSize (..))
 
+import           Ouroboros.Consensus.BlockchainTime.WallClock.Types
 import           Ouroboros.Consensus.Config.SecurityParam
 import           Ouroboros.Consensus.Mempool.API (extractTxs)
 import           Ouroboros.Consensus.Node.ProtocolInfo
@@ -80,7 +81,7 @@ prop_simple_cardano_convergence k d
             , nodeInfo    = \(CoreNodeId nid) ->
               plainTestNodeInitialization @(CardanoBlock TPraosMockCrypto) $
                 castProtocolInfo $ injProtocolInfo
-                  (sgStartTime genesisConfig)
+                  (SystemStart $ sgStartTime genesisConfig)
                   (mkProtocolRealTPraos
                     genesisConfig
                     (coreNodes !! fromIntegral nid))

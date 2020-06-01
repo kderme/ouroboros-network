@@ -34,8 +34,10 @@ import           Cardano.Slotting.Slot (EpochNo (..), EpochSize (..),
                      SlotNo (..), WithOrigin (Origin))
 
 import           Ouroboros.Network.Block (genesisPoint)
+import           Ouroboros.Network.Magic
 
 import           Ouroboros.Consensus.Block
+import           Ouroboros.Consensus.BlockchainTime.WallClock.Types
 import           Ouroboros.Consensus.Config
 import           Ouroboros.Consensus.Config.SecurityParam
 import           Ouroboros.Consensus.HeaderValidation
@@ -52,6 +54,7 @@ import qualified Shelley.Spec.Ledger.Credential as SL
 import           Shelley.Spec.Ledger.Crypto (HASH)
 import qualified Shelley.Spec.Ledger.Delegation.Certificates as SL
 import qualified Shelley.Spec.Ledger.EpochBoundary as SL
+import           Shelley.Spec.Ledger.Genesis
 import qualified Shelley.Spec.Ledger.Keys as SL
 import qualified Shelley.Spec.Ledger.LedgerState as SL
 import qualified Shelley.Spec.Ledger.PParams as SL
@@ -62,7 +65,6 @@ import qualified Shelley.Spec.Ledger.STS.Prtcl as SL
 import qualified Shelley.Spec.Ledger.Tx as SL
 import qualified Shelley.Spec.Ledger.UTxO as SL
 
-import           Ouroboros.Consensus.Shelley.Genesis
 import           Ouroboros.Consensus.Shelley.Ledger
 import qualified Ouroboros.Consensus.Shelley.Ledger.History as History
 import           Ouroboros.Consensus.Shelley.Ledger.NetworkProtocolVersion ()
@@ -149,7 +151,7 @@ protocolInfoShelley genesis protVer mbCredentials =
         tpraosEpochInfo         = epochInfo
       , tpraosSlotsPerKESPeriod = sgSlotsPerKESPeriod genesis
       , tpraosLeaderF           = sgActiveSlotCoeff   genesis
-      , tpraosSecurityParam     = sgSecurityParam     genesis
+      , tpraosSecurityParam     = SecurityParam $ sgSecurityParam     genesis
       , tpraosMaxKESEvo         = sgMaxKESEvolutions  genesis
       , tpraosQuorum            = sgUpdateQuorum      genesis
       , tpraosMaxMajorPV        = sgMaxMajorPV        genesis
@@ -166,8 +168,8 @@ protocolInfoShelley genesis protVer mbCredentials =
     blockConfig :: BlockConfig (ShelleyBlock c)
     blockConfig = ShelleyConfig {
         shelleyProtocolVersion = protVer
-      , shelleyStartTime       = sgStartTime       genesis
-      , shelleyNetworkMagic    = sgNetworkMagic    genesis
+      , shelleyStartTime       = SystemStart $ sgStartTime genesis
+      , shelleyNetworkMagic    = NetworkMagic $ sgNetworkMagic genesis
       , shelleyProtocolMagicId = sgProtocolMagicId genesis
       }
 

@@ -82,13 +82,13 @@ import qualified Shelley.Spec.Ledger.BaseTypes as SL
 import qualified Shelley.Spec.Ledger.Coin as SL
 import qualified Shelley.Spec.Ledger.Credential as SL
 import qualified Shelley.Spec.Ledger.Delegation.Certificates as SL
+import qualified Shelley.Spec.Ledger.Genesis as SL
 import qualified Shelley.Spec.Ledger.Keys as SL
 import qualified Shelley.Spec.Ledger.LedgerState as SL
 import qualified Shelley.Spec.Ledger.PParams as SL
 import qualified Shelley.Spec.Ledger.STS.Chain as STS
 import qualified Shelley.Spec.Ledger.UTxO as SL
 
-import           Ouroboros.Consensus.Shelley.Genesis
 import           Ouroboros.Consensus.Shelley.Ledger.Block
 import qualified Ouroboros.Consensus.Shelley.Ledger.History as History
 import           Ouroboros.Consensus.Shelley.Ledger.TPraos ()
@@ -106,7 +106,7 @@ data ShelleyLedgerError c
 instance Crypto c => NoUnexpectedThunks (ShelleyLedgerError c)
 
 data ShelleyLedgerConfig c = ShelleyLedgerConfig {
-      shelleyLedgerGenesis   :: !(ShelleyGenesis c)
+      shelleyLedgerGenesis   :: !(SL.ShelleyGenesis c)
       -- | Derived from 'shelleyLedgerGenesis' but we store a cached version
       -- because it used very often.
     , shelleyLedgerGlobals   :: !SL.Globals
@@ -125,35 +125,35 @@ mkShelleyEraParams (SecurityParam k) epochLen slotLen = HardFork.EraParams {
     }
 
 mkShelleyLedgerConfig
-  :: ShelleyGenesis c
+  :: SL.ShelleyGenesis c
   -> EpochInfo Identity
   -> ShelleyLedgerConfig c
 mkShelleyLedgerConfig genesis epochInfo = ShelleyLedgerConfig {
       shelleyLedgerGenesis   = genesis
     , shelleyLedgerGlobals   = shelleyGlobals
     , shelleyLedgerEraParams = mkShelleyEraParams
-                                 (sgSecurityParam genesis)
-                                 (sgEpochLength   genesis)
-                                 (sgSlotLength    genesis)
+                                 (SecurityParam $ SL.sgSecurityParam genesis)
+                                 (SL.sgEpochLength   genesis)
+                                 (mkSlotLength $ SL.sgSlotLength    genesis)
     }
   where
-    SecurityParam k = sgSecurityParam genesis
-    f = SL.intervalValue . SL.activeSlotVal $ sgActiveSlotCoeff genesis
+    SecurityParam k = SecurityParam $ SL.sgSecurityParam genesis
+    f = SL.intervalValue . SL.activeSlotVal $ SL.sgActiveSlotCoeff genesis
 
     shelleyGlobals :: SL.Globals
     shelleyGlobals = SL.Globals {
           epochInfo         = epochInfo
-        , slotsPerKESPeriod = sgSlotsPerKESPeriod genesis
+        , slotsPerKESPeriod = SL.sgSlotsPerKESPeriod genesis
           -- The values 3k/f and 4k/f are determined to be suitabe values as per
           -- https://docs.google.com/document/d/1B8BNMx8jVWRjYiUBOaI3jfZ7dQNvNTSDODvT5iOuYCU/edit#heading=h.qh2zcajmu6hm
         , stabilityWindow   = ceiling $ fromIntegral @_ @Double (3 * k) / fromRational f
         , randomnessStabilisationWindow = ceiling $ fromIntegral @_ @Double (4 * k) / fromRational f
         , securityParameter = k
-        , maxKESEvo         = sgMaxKESEvolutions  genesis
-        , quorum            = sgUpdateQuorum      genesis
-        , maxMajorPV        = sgMaxMajorPV        genesis
-        , maxLovelaceSupply = sgMaxLovelaceSupply genesis
-        , activeSlotCoeff   = sgActiveSlotCoeff   genesis
+        , maxKESEvo         = SL.sgMaxKESEvolutions  genesis
+        , quorum            = SL.sgUpdateQuorum      genesis
+        , maxMajorPV        = SL.sgMaxMajorPV        genesis
+        , maxLovelaceSupply = SL.sgMaxLovelaceSupply genesis
+        , activeSlotCoeff   = SL.sgActiveSlotCoeff   genesis
         }
 
 type instance LedgerCfg (LedgerState (ShelleyBlock c)) = ShelleyLedgerConfig c

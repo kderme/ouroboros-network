@@ -1,43 +1,37 @@
-{-# LANGUAGE FlexibleContexts  #-}
-{-# LANGUAGE NamedFieldPuns    #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes        #-}
-{-# LANGUAGE RecordWildCards   #-}
-{-# LANGUAGE TypeApplications  #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NamedFieldPuns      #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications    #-}
 
 module Main (main) where
 
 import           Control.Monad.Except
-import           Data.ByteString (ByteString)
-import qualified Data.ByteString as BS (length)
-import           Data.Coerce
+import qualified Data.ByteString.Lazy as BL (length)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS.Char8
 import           Data.Foldable (asum)
 import           Data.Functor.Identity
 import           Data.IORef
 import           Data.List (foldl', intercalate)
 import           Data.Proxy (Proxy (..))
 import           Data.Word
+import           GHC.Int (Int64)
 import           GHC.Natural (Natural)
 import           Options.Applicative
+import           Text.Read (read)
 
-import           Cardano.Binary (unAnnotated)
 import           Cardano.Slotting.EpochInfo
 import           Cardano.Slotting.Slot
 
-import qualified Cardano.Chain.Block as Chain
-import qualified Cardano.Chain.Genesis as Genesis
-import           Cardano.Chain.Slotting (EpochSlots (..))
-import qualified Cardano.Chain.Update as Update
-import qualified Cardano.Chain.UTxO as Chain
-import qualified Cardano.Crypto as Crypto
-
-import           Ouroboros.Network.Block (HasHeader (..), SlotNo (..),
-                     genesisPoint)
+import           Ouroboros.Network.Block (HasHeader (..), HeaderHash,
+                     SlotNo (..), genesisPoint)
 
 import           Ouroboros.Consensus.Block
 import           Ouroboros.Consensus.Config
 import           Ouroboros.Consensus.Node.NetworkProtocolVersion
-import           Ouroboros.Consensus.Node.ProtocolInfo
 import           Ouroboros.Consensus.Node.Run
 import           Ouroboros.Consensus.Util.ResourceRegistry
 
@@ -48,25 +42,33 @@ import           Ouroboros.Consensus.Storage.ChainDB.Impl.ImmDB hiding
 import qualified Ouroboros.Consensus.Storage.ChainDB.Impl.ImmDB as ImmDB
                      (withImmDB)
 import qualified Ouroboros.Consensus.Storage.ImmutableDB.API as ImmDB
-import           Ouroboros.Consensus.Storage.ImmutableDB.Chunks
-                     (simpleChunkInfo)
+import           Ouroboros.Consensus.Byron.Node ()
 
-import           Ouroboros.Consensus.Byron.Ledger (ByronBlock, ByronHash)
-import qualified Ouroboros.Consensus.Byron.Ledger as Byron
-import           Ouroboros.Consensus.Byron.Node
+import           Ouroboros.Consensus.Byron.Ledger (ByronBlock)
+import           Ouroboros.Consensus.Shelley.Ledger.Block (ShelleyBlock (..))
+import           Ouroboros.Consensus.Shelley.Protocol.Crypto (TPraosStandardCrypto)
+
+import qualified Analysis as Analysis
 
 main :: IO ()
 main = do
-    CmdLine{..}   <- getCmdLine
-    genesisConfig <- openGenesis clConfig clIsMainNet
-    let epochSlots = Genesis.configEpochSlots genesisConfig
-        epochInfo  = fixedSizeEpochInfo (coerce epochSlots)
-        chunkInfo  = simpleChunkInfo    (coerce epochSlots)
-        cfg        = mkByronTopLevelConfig genesisConfig
-    print epochSlots
-    print chunkInfo
+    cmdLine@CmdLine{..}   <- getCmdLine
+    marker :: Word32 <-
+      read . BS.Char8.unpack <$> BS.readFile (clImmDB ++ "/protocolMagicId")
+    case marker of
+      764824073  -> startAnalysis cmdLine (Proxy :: Proxy ByronBlock)
+      1097911063 -> startAnalysis cmdLine (Proxy :: Proxy ByronBlock)
+      42         -> startAnalysis cmdLine (Proxy :: Proxy (ShelleyBlock TPraosStandardCrypto))
+      _          -> error $ "unsuported dbmarker: " ++ show marker
+
+startAnalysis :: forall blk.
+                 (RunNode blk, HasAnalysis blk)
+              => CmdLine -> Proxy blk -> IO ()
+startAnalysis CmdLine{..} _ = do
+    (epochInfo, cfg :: TopLevelConfig blk) <- mkTopLevelConfig clConfig clIsMainNet
+    print epochInfo
     withRegistry $ \registry ->
-      withImmDB clImmDB cfg chunkInfo registry $ \immDB -> do
+      withImmDB clImmDB cfg registry $ \immDB -> do
         runAnalysis clAnalysis immDB epochInfo registry
         putStrLn "Done"
 
@@ -80,12 +82,13 @@ data AnalysisName =
   | ShowBlockHeaderSize
   | ShowBlockTxsSize
 
-type Analysis = ImmDB IO ByronBlock
-             -> EpochInfo Identity
-             -> ResourceRegistry IO
-             -> IO ()
+type Analysis blk = ImmDB IO blk
+                 -> EpochInfo Identity
+                 -> ResourceRegistry IO
+                 -> IO ()
 
-runAnalysis :: AnalysisName -> Analysis
+runAnalysis :: (HasAnalysis blk, RunNode blk)
+    => AnalysisName -> Analysis blk
 runAnalysis ShowSlotBlockNo     = showSlotBlockNo
 runAnalysis CountTxOutputs      = countTxOutputs
 runAnalysis ShowBlockHeaderSize = showBlockHeaderSize
@@ -95,11 +98,12 @@ runAnalysis ShowBlockTxsSize    = showBlockTxsSize
   Analysis: show block and slot number for all blocks
 -------------------------------------------------------------------------------}
 
-showSlotBlockNo :: Analysis
+showSlotBlockNo :: forall blk. HasHeader blk
+                =>  Analysis blk
 showSlotBlockNo immDB _epochInfo rr =
     processAll immDB rr go
   where
-    go :: ByronBlock -> IO ()
+    go :: blk -> IO ()
     go blk = putStrLn $ intercalate "\t" [
         show (blockNo   blk)
       , show (blockSlot blk)
@@ -109,46 +113,28 @@ showSlotBlockNo immDB _epochInfo rr =
   Analysis: show total number of tx outputs per block
 -------------------------------------------------------------------------------}
 
-countTxOutputs :: Analysis
+countTxOutputs :: forall blk. (HasHeader blk, HasAnalysis blk)
+               => Analysis blk
 countTxOutputs immDB epochInfo rr = do
     cumulative <- newIORef 0
     processAll immDB rr (go cumulative)
   where
-    go :: IORef Int -> ByronBlock -> IO ()
-    go cumulative blk = case blk of
-      Byron.ByronBlock (Chain.ABOBBlock regularBlk) _ _ ->
-        go' cumulative (blockSlot blk) regularBlk
-      _otherwise ->
-        return () -- Skip EBBs
-
-    go' :: IORef Int -> SlotNo -> Chain.ABlock a -> IO ()
-    go' cumulative slotNo Chain.ABlock{..} = do
-        countCum  <- atomicModifyIORef cumulative $ \c ->
-                       let c' = c + count in (c', c')
-        let epochSlot = relativeSlotNo epochInfo slotNo
-        putStrLn $ intercalate "\t" [
-            show slotNo
-          , show epochSlot
-          , show count
-          , show countCum
-          ]
+    go :: IORef Int -> blk -> IO ()
+    go cumulative blk = case Analysis.countTxOutputs blk of
+        Nothing ->
+          return () -- Skip
+        Just count -> do
+          countCum  <- atomicModifyIORef cumulative $ \c ->
+                         let c' = c + count in (c', c')
+          putStrLn $ intercalate "\t" [
+              show slotNo
+            , show epochSlot
+            , show count
+            , show countCum
+            ]
       where
-        Chain.AHeader{..} = blockHeader
-        Chain.ABody{..}   = blockBody
-
-        count :: Int
-        count = countTxPayload bodyTxPayload
-
-    countTxPayload :: Chain.ATxPayload a -> Int
-    countTxPayload = sum'
-                   . map (countTx . unAnnotated . Chain.aTaTx)
-                   . Chain.aUnTxPayload
-
-    countTx :: Chain.Tx -> Int
-    countTx = length . Chain.txOutputs
-
-    sum' :: [Int] -> Int
-    sum' = foldl' (+) 0
+        slotNo = blockSlot blk
+        epochSlot = relativeSlotNo epochInfo slotNo
 
 -- | Convert 'SlotNo' to relative 'EpochSlot'
 --
@@ -160,25 +146,25 @@ relativeSlotNo :: EpochInfo Identity -> SlotNo -> (EpochNo, Word64)
 relativeSlotNo chunkInfo (SlotNo absSlot) = runIdentity $ do
     epoch        <- epochInfoEpoch chunkInfo (SlotNo absSlot)
     SlotNo first <- epochInfoFirst chunkInfo epoch
-    return $ (epoch, absSlot - first)
+    return (epoch, absSlot - first)
 
 {-------------------------------------------------------------------------------
   Analysis: show the block header size in bytes for all blocks
 -------------------------------------------------------------------------------}
 
-showBlockHeaderSize :: Analysis
+showBlockHeaderSize :: forall blk. (HasAnalysis blk, HasHeader blk)
+                    => Analysis blk
 showBlockHeaderSize immDB epochInfo rr = do
     maxBlockHeaderSizeRef <- newIORef 0
     processAll immDB rr (go maxBlockHeaderSizeRef)
     maxBlockHeaderSize <- readIORef maxBlockHeaderSizeRef
     putStrLn ("Maximum encountered block header size = " <> show maxBlockHeaderSize)
   where
-    go :: IORef Natural -> ByronBlock -> IO ()
+    go :: IORef Natural -> blk -> IO ()
     go maxBlockHeaderSizeRef blk =
-        case blk of
-          Byron.ByronBlock (Chain.ABOBBlock regularBlk) _ _ -> do
-            let blockHdrSz = Chain.headerLength (Chain.blockHeader regularBlk)
-                slotNo = blockSlot blk
+        case Analysis.blockHeaderSize blk of
+          Just blockHdrSz -> do
+            let slotNo = blockSlot blk
             void $ modifyIORef' maxBlockHeaderSizeRef (max blockHdrSz)
             let epochSlot = relativeSlotNo epochInfo slotNo
             putStrLn $ intercalate "\t" [
@@ -186,55 +172,47 @@ showBlockHeaderSize immDB epochInfo rr = do
               , show epochSlot
               , "Block header size = " <> show blockHdrSz
               ]
-          _otherwise ->
-            return () -- Skip EBBs
+          Nothing -> return () -- Skip
 
 {-------------------------------------------------------------------------------
   Analysis: show the total transaction sizes in bytes per block
 -------------------------------------------------------------------------------}
 
-showBlockTxsSize :: Analysis
-showBlockTxsSize immDB epochInfo rr = processAll immDB rr processUnlessEBB
+showBlockTxsSize :: forall blk. (HasHeader blk, HasAnalysis blk)
+  => Analysis blk
+showBlockTxsSize immDB epochInfo rr = processAll immDB rr process
   where
-    processUnlessEBB :: ByronBlock -> IO ()
-    processUnlessEBB blk =
-        case blk of
-          Byron.ByronBlock (Chain.ABOBBlock regularBlk) _ _ ->
-            process (blockSlot blk) regularBlk
-          _otherwise ->
-            return () -- Skip EBBs
+    process :: blk -> IO ()
+    process blk = case Analysis. blockTxsSize blk of
+      Nothing -> return () -- Skip
+      Just txs ->
+          putStrLn $ intercalate "\t" [
+              show slotNo
+            , show epochSlot
+            , "Num txs in block = " <> show numBlockTxs
+            , "Total size of txs in block = " <> show blockTxsSize
+            ]
+        where
 
-    process :: SlotNo -> Chain.ABlock ByteString -> IO ()
-    process slotNo block = do
-        let epochSlot = relativeSlotNo epochInfo slotNo
-        putStrLn $ intercalate "\t" [
-            show slotNo
-          , show epochSlot
-          , "Num txs in block = " <> show numBlockTxs
-          , "Total size of txs in block = " <> show blockTxsSize
-          ]
-      where
-        Chain.ABlock{ blockBody } = block
-        Chain.ABody{ bodyTxPayload } = blockBody
-        Chain.ATxPayload{ aUnTxPayload = blockTxAuxs } = bodyTxPayload
+          numBlockTxs :: Int
+          numBlockTxs = length txs
 
-        txsSerializedLength :: [Chain.ATxAux ByteString] -> Int
-        txsSerializedLength txs = foldl' (+) 0 $
-          map (BS.length . Chain.aTaAnnotation) txs
+          blockTxsSize :: Int64
+          blockTxsSize = foldl' (+) 0 $
+            map BL.length txs
 
-        numBlockTxs :: Int
-        numBlockTxs = length blockTxAuxs
-
-        blockTxsSize :: Int
-        blockTxsSize = txsSerializedLength blockTxAuxs
+          slotNo = blockSlot blk
+          epochSlot = relativeSlotNo epochInfo slotNo
 
 {-------------------------------------------------------------------------------
   Auxiliary: processing all blocks in the imm DB
 -------------------------------------------------------------------------------}
 
-processAll :: ImmDB IO ByronBlock
+processAll :: forall blk.
+              HasHeader blk
+           => ImmDB IO blk
            -> ResourceRegistry IO
-           -> (ByronBlock -> IO ())
+           -> (blk -> IO ())
            -> IO ()
 processAll immDB rr callback = do
     tipPoint <- getPointAtTip immDB
@@ -246,7 +224,7 @@ processAll immDB rr callback = do
           (StreamToInclusive tip)
         go itr
   where
-    go :: Iterator ByronHash IO (IO ByronBlock) -> IO ()
+    go :: Iterator (HeaderHash blk) IO (IO blk) -> IO ()
     go itr = do
         itrResult <- ImmDB.iteratorNext itr
         case itrResult of
@@ -262,20 +240,21 @@ data CmdLine = CmdLine {
     , clIsMainNet :: Bool
     , clImmDB     :: FilePath
     , clAnalysis  :: AnalysisName
+--    , clEra       :: Era
     }
 
 parseCmdLine :: Parser CmdLine
 parseCmdLine = CmdLine
-    <$> (strOption $ mconcat [
+    <$> strOption (mconcat [
             long "config"
           , help "Path to config file"
           , metavar "PATH"
           ])
-    <*> (flag True False $ mconcat [
+    <*> flag True False (mconcat [
             long "testnet"
           , help "The DB contains blocks from testnet rather than mainnet"
           ])
-    <*> (strOption $ mconcat [
+    <*> strOption (mconcat [
             long "db"
           , help "Path to the chain DB (parent of \"immutable\" directory)"
           , metavar "PATH"
@@ -311,58 +290,29 @@ getCmdLine = execParser opts
         ])
 
 {-------------------------------------------------------------------------------
-  Genesis config
--------------------------------------------------------------------------------}
-
-openGenesis :: FilePath -> Bool -> IO Genesis.Config
-openGenesis configFile onMainNet = do
-    Right genesisHash <- runExceptT $
-      snd <$> Genesis.readGenesisData configFile
-    Right genesisConfig <- runExceptT $
-      Genesis.mkConfigFromFile
-        (if onMainNet -- transactions on testnet include magic number
-          then Crypto.RequiresNoMagic
-          else Crypto.RequiresMagic)
-        configFile
-        (Genesis.unGenesisHash genesisHash)
-    return genesisConfig
-
-{-------------------------------------------------------------------------------
-  Top-level configuration
--------------------------------------------------------------------------------}
-
-mkByronTopLevelConfig :: Genesis.Config -> TopLevelConfig ByronBlock
-mkByronTopLevelConfig genesisConfig = pInfoConfig $
-    protocolInfoByron
-      genesisConfig
-      Nothing
-      (Update.ProtocolVersion 1 0 0)
-      (Update.SoftwareVersion (Update.ApplicationName "db-analyse") 2)
-      Nothing
-
-{-------------------------------------------------------------------------------
   Interface with the ImmDB
 -------------------------------------------------------------------------------}
 
-withImmDB :: FilePath
-          -> TopLevelConfig ByronBlock
-          -> ChunkInfo
+withImmDB :: forall blk a.
+             RunNode blk
+          => FilePath
+          -> TopLevelConfig blk
           -> ResourceRegistry IO
-          -> (ImmDB IO ByronBlock -> IO a)
+          -> (ImmDB IO blk -> IO a)
           -> IO a
-withImmDB fp cfg chunkInfo registry = ImmDB.withImmDB args
+withImmDB fp cfg registry = ImmDB.withImmDB args
   where
     bcfg = configCodec cfg
-    pb   = Proxy @ByronBlock
+    pb   = Proxy @blk
 
-    args :: ImmDbArgs IO ByronBlock
+    args :: ImmDbArgs IO blk
     args = (defaultArgs fp) {
           immDecodeHash     = nodeDecodeHeaderHash    pb
         , immDecodeBlock    = nodeDecodeBlock         bcfg
         , immDecodeHeader   = nodeDecodeHeader        bcfg SerialisedToDisk
         , immEncodeHash     = nodeEncodeHeaderHash    pb
         , immEncodeBlock    = nodeEncodeBlockWithInfo bcfg
-        , immChunkInfo      = chunkInfo
+        , immChunkInfo      = nodeImmDbChunkInfo cfg
         , immHashInfo       = nodeHashInfo            pb
         , immValidation     = ValidateMostRecentChunk
         , immIsEBB          = nodeIsEBB

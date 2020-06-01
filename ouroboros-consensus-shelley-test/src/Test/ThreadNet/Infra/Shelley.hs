@@ -36,8 +36,6 @@ import           Cardano.Crypto.VRF.Class (SignKeyVRF, deriveVerKeyVRF,
                      genKeyVRF)
 import           Cardano.Slotting.Slot (EpochSize (..))
 
-import           Ouroboros.Network.Magic (NetworkMagic (..))
-
 import           Ouroboros.Consensus.BlockchainTime
 import           Ouroboros.Consensus.Config.SecurityParam
 import           Ouroboros.Consensus.Node.ProtocolInfo
@@ -158,17 +156,17 @@ mkGenesisConfig
   -> Word64  -- ^ Max KES evolutions
   -> [CoreNode c]
   -> ShelleyGenesis c
-mkGenesisConfig k d maxKESEvolutions coreNodes = ShelleyGenesis {
+mkGenesisConfig (SecurityParam k) d maxKESEvolutions coreNodes = ShelleyGenesis {
       -- Matches the start of the ThreadNet tests
-      sgStartTime             = SystemStart dawnOfTime
-    , sgNetworkMagic          = NetworkMagic 0
+      sgStartTime             = dawnOfTime
+    , sgNetworkMagic          = 0
     , sgProtocolMagicId       = ProtocolMagicId 0
     , sgActiveSlotsCoeff      = 0.5 -- TODO 1 is not accepted by 'mkActiveSlotCoeff'
     , sgSecurityParam         = k
-    , sgEpochLength           = EpochSize (10 * maxRollbacks k)
+    , sgEpochLength           = EpochSize (10 * k)
     , sgSlotsPerKESPeriod     = 10 -- TODO
     , sgMaxKESEvolutions      = maxKESEvolutions
-    , sgSlotLength            = tpraosSlotLength
+    , sgSlotLength            = 2 -- TODO
     , sgUpdateQuorum          = 1  -- TODO
     , sgMaxMajorPV            = 1000 -- TODO
     , sgMaxLovelaceSupply     = maxLovelaceSupply
